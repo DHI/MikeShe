@@ -1,7 +1,6 @@
 # Subject: This is a MIKE SHE plugin that writes SZ boundary flows of the current simulation to a dfs2 file,
 #          one item per layer, each simulation time step.
 # Usage:   
-#   - In the method setupDfs0 adapt the path in sys.path.append to your MIKE installation directory (because Pythonnet fails to load dlls from GAC)
 #   - Reference this file as a plugin in the MIKE SHE GUI and run the simulation.
 # Limitations:
 #   - The spatial reference cannot currently be retrieved from MIKE SHE, so the output dfs2 file will be set to "local coordinates".
@@ -54,8 +53,7 @@ def setupDfs0():
   global simStart
   global simStart
   now = MShePy.wm.currentTime()
-  sys.path.append(r"C:\Work\Main\Products\bin") # TODO adapt!
-  clr.AddReference("DHI.Mike.Install")
+  clr.AddReference("DHI.Mike.Install, Version=1.0.0.0, Culture=neutral, PublicKeyToken=c513450b5d0bf0bf") # "fully qualified" name required!
   from DHI.Mike.Install import MikeImport, MikeProducts
   MikeImport.SetupLatest()
   clr.AddReference("DHI.Generic.MikeZero.DFS")
