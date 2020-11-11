@@ -245,7 +245,7 @@ def main(cfg):
     rePtPathExtrName  = re.compile('( *Name = \')([^\']*)')
 
     # temps
-    extractionNo = 0
+    extractionNo = 1
     strCurrentExtr = ""
     strAllExtractions = ""
 
@@ -270,13 +270,15 @@ def main(cfg):
                     strCurrentExtr += lineIn
 
                 if endOfExtraction: # end of one extraction, so it's time to append it
-                    extractionNo += 1
                     if name in name2ids:
                         # update this extraction from the ids found in dbf file
                         ids = name2ids.pop(name)
                         ptExtrSect = buildOneExtraction(name, extractionNo, ids)
+                        if ptExtrSect:
+                            extractionNo += 1
                     else:
                         # not our business, leave this extraction untouched
+                        extractionNo += 1
                         ptExtrSect = strCurrentExtr + "\n"
 
                     strAllExtractions += ptExtrSect
@@ -285,10 +287,11 @@ def main(cfg):
                 if not inPtPathSection: # then this line has the closing tag
                     for name, ids in name2ids.items(): # (updated names already pop'ed!)
                         # build the _new_ extractions (that were not already present in the she file)
-                        extractionNo += 1
                         ptExtrSect = buildOneExtraction(name, extractionNo, ids)
-                        strAllExtractions += ptExtrSect
-                    PtPathlExtrSect = ptf.PtPathExtrTempl.format(extractionNo, strAllExtractions)
+                        if ptExtrSect:
+                            extractionNo += 1
+                            strAllExtractions += ptExtrSect
+                    PtPathlExtrSect = ptf.PtPathExtrTempl.format(extractionNo - 1, strAllExtractions)
                     outf.write(PtPathlExtrSect)
             else:
                 outf.write(lineIn)
