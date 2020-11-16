@@ -209,6 +209,7 @@ def main(cfg):
         return
 
     print("")
+    writeCfg(cfg)
 
     dbfPathPattern = r"{0}\{1}.she - Result Files\PTReg_*.dbf".format(sheFolder, sheName)
 
@@ -305,5 +306,6 @@ if __name__ == "__main__":
         parser.parse_args()
         main(cfg)
     except:
+        # try/except like this is just so that you get something to see when double-clicking in win explorer
         traceback.print_exc()
     input('Press Enter to Exit...')
