@@ -71,18 +71,13 @@ def main(txtDir, refTime):
 
     
 if __name__ == "__main__":
-    try:
-        parser = argparse.ArgumentParser()
-        parser.add_argument("-d", 
-                            "--startdate",  
-                            help="reference date-time, format 'YY-MM-DD' (start of simulation)",
-                            dest="refTime",
-                            type=lambda s: datetime.datetime.strptime(s, '%Y-%m-%d'), 
-                            default = datetime.datetime(2000, 1, 1, 0, 0, 0))
-        parser.add_argument("directory")
-        args = parser.parse_args()
-        
-        main(args.directory, args.refTime)
-    except:
-        traceback.print_exc()
-    input('\nPress Enter to Exit...')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", 
+                        "--startdate",  
+                        help="reference date-time, format 'YY-MM-DD' (start of simulation)",
+                        dest="refTime",
+                        type=lambda s: datetime.datetime.strptime(s, '%Y-%m-%d'), 
+                        default = datetime.datetime(2000, 1, 1, 0, 0, 0))
+    parser.add_argument("directory")
+    args = parser.parse_args()
+    main(args.directory, args.refTime)
