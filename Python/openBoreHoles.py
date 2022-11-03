@@ -108,7 +108,7 @@ class BoreHole:
   def __init__(self, name, x, y, d, zlyg, leak):
     self.i, self.j = ms.wm.gridCoordToCell(x, y)
     if not ms.wm.gridIsInternal(self.i, self.j):
-      raise ValueError("Cannot create borehole {0} outside the model area!".format(name))
+      raise ValueError(f"Cannot create borehole {name} outside the model area!")
     self.name = name
     self.n_lay = len(zlyg) - 1
     self.leak = leak # bore hole to SZ exchange leakage coefficient
@@ -134,13 +134,12 @@ class BoreHole:
         ex_area: [{', '.join(f'{x:9.4g}' for x in self.ex_area)}]""")
     
 def read_layer_bottoms():
-  global setup_name
   # For now assume default result folder is being used. For extra safety we could check for a custom result folder in the she file, target "SYSTEM":
   #[SYSTEM]
   #   UseCustomResultFolder = true
   #   CustomResultFolder = |.\MyFolder|
   # For extra extra safety we'd have to check if the she file has been modified after preprocessing.
-  fn = os.path.join(setup_dir, "{0}.she - Result Files/{0}_PreProcessed_3DSZ.dfs3".format(setup_name))
+  fn = os.path.join(setup_dir, f"{setup_name}.she - Result Files/{setup_name}_PreProcessed_3DSZ.dfs3")
   item = "Lower level of computational layers in the saturated zone"
   zly = mikeio.read(fn, items=item)[0].values[0] # [0]: item, [0]: time step
 
@@ -150,10 +149,6 @@ def read_layer_bottoms():
 # Initializations
 def postEnterSimulator():
   global bh_1
-  global flow_distance_cell_ratio
-  global bh1_name
-  global bh1_coords
-  global d_bh
   global setup_dir
   global setup_name
   # general values:
@@ -164,7 +159,7 @@ def postEnterSimulator():
   # retrieve other values for bore hole:
   i, j = ms.wm.gridCoordToCell(bh1_coords[0], bh1_coords[1])
   if not ms.wm.gridIsInternal(i, j):
-    raise ValueError("Cannot create borehole at {0} which is outside the model area!".format(bh1_coords))
+    raise ValueError(f"Cannot create borehole at {bh1_coords} which is outside the model area!")
     
   setup_dir, setup_name = os.path.split(ms.wm.getSheFilePath())
   setup_name, _ = os.path.splitext(setup_name)
@@ -179,7 +174,6 @@ def postEnterSimulator():
   ms.wm.print(bh_1)
 
 def preTimeStep():
-  global bh_1
   _, sz_time, sz_heads = ms.wm.getValues(ms.paramTypes.SZ_HEAD) # sz_time is from previous time step, as are the heads!
   if(sz_time is None): # Not an SZ time step
     return
@@ -201,8 +195,8 @@ def preTimeStep():
         qex = (bh_head - sz_heads[bh_1.i, bh_1.j, i]) * bh_1.ex_area[i] * bh_1.leak[i]
         szSource[bh_1.i, bh_1.j, i] = qex
         if bh_head < bh_1.zly[i]:
-          msg =  "WARNING: Head in bore hole \"{:}\" has fallen to {:7.3f} m, below the bottom of layer no. {:} ({:7.3f} m) at {:}!".format(bh_1.name, bh_head, i, bh_1.zly[i], sz_time)
-          msg += " The flow from this layer into the bore hole will be overestimated."
+          msg = f"WARNING: Head in bore hole \"{bh_1.name}\" has fallen to {bh_head:7.3f} m, below the bottom of layer no. {i} "\
+                "({bh_1.zly[i]:7.3f} m) at {sz_time}! The flow from this layer into the bore hole will be overestimated."
           # If this is an issue then an iterative approach for finding the solution is required, like in the 1st version of this plugin!
           ms.wm.log(msg)
   else:
@@ -219,12 +213,10 @@ def preTimeStep():
   ms.wm.setValues(szSource)
 
 def preLeaveSimulator():
-  global bh_1
-  global setup_name
   preTimeStep() # capture end of last time step
   title = "Open bore hole heads"
-  items = [mikeio.ItemInfo("Head {0}".format(bh_1.name), itemtype=mikeio.EUMType.Water_Level)]
-  fname = os.path.join(setup_dir, "{0}.she - Result Files/{0}_BoreHoleHeads.dfs0".format(setup_name))
+  items = [mikeio.ItemInfo(f"Head {bh_1.name}", itemtype=mikeio.EUMType.Water_Level)]
+  fname = os.path.join(setup_dir, f"{setup_name}.she - Result Files/{setup_name}_BoreHoleHeads.dfs0")
 
   dfs = mikeio.Dfs0()
   dfs.write(
