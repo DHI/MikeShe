@@ -83,9 +83,6 @@
 # Open length of bore hole:
 #   Currently each bore hole will extend from the bottom to the top of the model. A limited depth and a potential coating in the top layer(s) would have to be implemented if needed.
 #
-# Setup name:
-#   MShePy lacks a function to return the current setup's name. This is therefore hard coded now.
-#
 # Custom result folder:
 #   Not currently supported - not provided by MShePy, result folder needed for reading SZ layer bottoms.
 #
@@ -105,7 +102,6 @@ bh1_name = "Bore Hole #1"
 bh1_coords = [24.0, 26.0] # coordinates in model coordinate system
 d_bh = 0.15  # borehole diameter (m)
 
-setup_name = "OpenWell" # name of the she file without .she extension
 flow_distance_cell_ratio = 0.4
 
 class BoreHole:
@@ -139,10 +135,14 @@ class BoreHole:
     
 def read_layer_bottoms():
   global setup_name
-  script_dir = os.path.dirname(os.path.realpath( __file__ ))
-  fn = os.path.join(script_dir, "{0}.she - Result Files/{0}_PreProcessed_3DSZ.dfs3".format(setup_name))
+  # For now assume default result folder is being used. For extra safety we could check for a custom result folder in the she file, target "SYSTEM":
+  #[SYSTEM]
+  #   UseCustomResultFolder = true
+  #   CustomResultFolder = |.\MyFolder|
+  # For extra extra safety we'd have to check if the she file has been modified after preprocessing.
+  fn = os.path.join(setup_dir, "{0}.she - Result Files/{0}_PreProcessed_3DSZ.dfs3".format(setup_name))
   item = "Lower level of computational layers in the saturated zone"
-  zly = mikeio.read(fn, items=item)[0].values[0] # .[0]: item, .[0]: time step
+  zly = mikeio.read(fn, items=item)[0].values[0] # [0]: item, [0]: time step
 
   # other than mshe datasets zly is [z,y,x] and z is bottom up!
   return np.transpose(zly) # (z, y, x) to (x, y, z)
@@ -154,6 +154,8 @@ def postEnterSimulator():
   global bh1_name
   global bh1_coords
   global d_bh
+  global setup_dir
+  global setup_name
   # general values:
   dx = ms.wm.gridCellToCoord(1, 0)[0] - ms.wm.gridCellToCoord(0, 0)[0] # cell size
   _, _, z_ground = ms.wm.getValues(ms.paramTypes.DEM_Z)
@@ -163,6 +165,9 @@ def postEnterSimulator():
   i, j = ms.wm.gridCoordToCell(bh1_coords[0], bh1_coords[1])
   if not ms.wm.gridIsInternal(i, j):
     raise ValueError("Cannot create borehole at {0} which is outside the model area!".format(bh1_coords))
+    
+  setup_dir, setup_name = os.path.split(ms.wm.getSheFilePath())
+  setup_name, _ = os.path.splitext(setup_name)
 
   # Currently bottom of sz layer elevation not available from MShePy - read thickness directly from PP'ed file:  
   zly = read_layer_bottoms()
@@ -219,8 +224,7 @@ def preLeaveSimulator():
   preTimeStep() # capture end of last time step
   title = "Open bore hole heads"
   items = [mikeio.ItemInfo("Head {0}".format(bh_1.name), itemtype=mikeio.EUMType.Water_Level)]
-  script_dir = os.path.dirname(os.path.realpath( __file__ ))
-  fname = os.path.join(script_dir, "{0}.she - Result Files/{0}_BoreHoleHeads.dfs0".format(setup_name))
+  fname = os.path.join(setup_dir, "{0}.she - Result Files/{0}_BoreHoleHeads.dfs0".format(setup_name))
 
   dfs = mikeio.Dfs0()
   dfs.write(
