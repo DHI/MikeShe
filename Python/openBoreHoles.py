@@ -92,23 +92,21 @@
 
 import MShePy as ms
 import math
-import mikeio
 import os
 import numpy as np
 import textwrap as tw
+import csv
+import sys
+import mikeio
 
-# hard coded for bore hole 1:
-bh1_name = "Bore Hole #1"
-bh1_coords = [24.0, 26.0] # coordinates in model coordinate system
-d_bh = 0.15  # borehole diameter (m)
-
+COL_CNT_CFG = 6
 flow_distance_cell_ratio = 0.4
 
 class BoreHole:
   def __init__(self, name, x, y, d, zlyg, leak):
     self.i, self.j = ms.wm.gridCoordToCell(x, y)
     if not ms.wm.gridIsInternal(self.i, self.j):
-      raise ValueError(f"Cannot create borehole {name} outside the model area!")
+      raise ValueError(f"Cannot create borehole \"{name}\" outside the model area!")
     self.name = name
     self.n_lay = len(zlyg) - 1
     self.leak = leak # bore hole to SZ exchange leakage coefficient
@@ -117,7 +115,6 @@ class BoreHole:
     self.d_bh = d # bore hole diameter
     self.ex_area = [dz * math.pi * self.d_bh for dz in self.dz_ly] # bore hole to SZ contact area
     self.heads = []
-    self.times = []
 
   def __repr__(self):
     return __str__()
@@ -148,30 +145,60 @@ def read_layer_bottoms():
 
 # Initializations
 def postEnterSimulator():
-  global bh_1
+  global bhs
+  global times
   global setup_dir
   global setup_name
   # general values:
+  bhs = []
+  times = []
   dx = ms.wm.gridCellToCoord(1, 0)[0] - ms.wm.gridCellToCoord(0, 0)[0] # cell size
   _, _, z_ground = ms.wm.getValues(ms.paramTypes.DEM_Z)
   zg = np.array(z_ground[:])
-  
-  # retrieve other values for bore hole:
-  i, j = ms.wm.gridCoordToCell(bh1_coords[0], bh1_coords[1])
-  if not ms.wm.gridIsInternal(i, j):
-    raise ValueError(f"Cannot create borehole at {bh1_coords} which is outside the model area!")
-    
+
   setup_dir, setup_name = os.path.split(ms.wm.getSheFilePath())
   setup_name, _ = os.path.splitext(setup_name)
 
-  # Currently bottom of sz layer elevation not available from MShePy - read thickness directly from PP'ed file:  
+  # Currently bottom of sz layer elevation not available from MShePy - read thickness directly from PP'ed file:
   zly = read_layer_bottoms()
   zgt = zg[..., None] # For ground elevations [x, y] add z dimension (with extent 1) for layer thickness calculation
   zlyg = np.concatenate([zly, zgt], 2) # Layer bottoms and ground elevation combined
   _, _, kh = ms.wm.getValues(ms.paramTypes.SZ_K_HOR) # Assuming k_f is static! Potentially it could be modified during run time via the api.
-  leak = [khl / (flow_distance_cell_ratio * dx) for khl in kh[i, j]]
-  bh_1 = BoreHole(bh1_name, bh1_coords[0], bh1_coords[1], d_bh, zlyg[i,j], leak)
-  ms.wm.print(bh_1)
+  
+  cfg_path = os.path.join(setup_dir, "openBoreHoles.txt")
+  if not os.path.exists(cfg_path):
+    raise ValueError(f"Looking for bore hole cfg file \"{cfg_path}\", but it does not exist!")
+  
+  with open(cfg_path) as csvFile:
+    cfg = csv.reader(csvFile, delimiter=';')
+    i = 0
+    for line in cfg:
+      if len(line)  == 0:
+        continue
+      if not len(line) == COL_CNT_CFG:
+        ms.wm.log("Expected bore hole configuration file format:")
+        ms.wm.log("  name; x; y; d; bot; top")
+        raise ValueError(f"Invalid bore hole configuration file {cfg_path}: expected {COL_CNT_CFG} columns but found {len(line)}.")
+      i += 1
+      if i > 1:
+        # retrieve other values for bore hole:
+        bh_name = line[0].strip()
+        bh_x = float(line[1])
+        bh_y = float(line[2])
+        bh_d = float(line[3])
+        i, j = ms.wm.gridCoordToCell(bh_x, bh_y)
+        if not ms.wm.gridIsInternal(i, j):
+          msg = f"Cannot create borehole \"{bh_name}\" outside the model area!\n"\
+                f"  x={bh_x}, y={bh_y};  i={i}, j={j}"
+          raise ValueError(msg)
+        ms.wm.log(f"i={i}, j={j}")
+        ms.wm.log(kh)
+        leak = [khl / (flow_distance_cell_ratio * dx) for khl in kh[i, j]] # leakage in this SZ column
+        if not ms.wm.gridIsInternal(i, j):
+          raise ValueError(f"Cannot create borehole at {bh1_coords} which is outside the model area!")
+        bh = BoreHole(bh_name, bh_x, bh_y, bh_d, zlyg[i,j], leak)
+        ms.wm.print(bh)
+        bhs.append(bh)
 
 def preTimeStep():
   _, sz_time, sz_heads = ms.wm.getValues(ms.paramTypes.SZ_HEAD) # sz_time is from previous time step, as are the heads!
@@ -180,49 +207,50 @@ def preTimeStep():
 
   ms.wm.print(f"\r\n\r\n########### {sz_time} ########################")
   szSource = ms.dataset(ms.paramTypes.SZ_SOURCE)
-  dividend = 0
-  divisor  = 0
-  for i in range(bh_1.n_lay):
-    if bh_1.leak[i] != 0:
-      dividend += sz_heads[bh_1.i, bh_1.j, i] * bh_1.ex_area[i] * bh_1.leak[i]
-      divisor  +=                           bh_1.ex_area[i] * bh_1.leak[i]
+  for bh in bhs:
+    dividend = 0
+    divisor  = 0
+    for i in range(bh.n_lay):
+      if bh.leak[i] != 0:
+        dividend += sz_heads[bh.i, bh.j, i] * bh.ex_area[i] * bh.leak[i]
+        divisor  +=                           bh.ex_area[i] * bh.leak[i]
 
-  if divisor > 0: # leakage to _any_ layer?
-    bh_head = dividend / divisor
-    for i in range(bh_1.n_lay):
-      if bh_1.leak[i] != 0:
-        # ex-flow for this layer/bh. Driving head _not_ limited to bottom of layer.
-        qex = (bh_head - sz_heads[bh_1.i, bh_1.j, i]) * bh_1.ex_area[i] * bh_1.leak[i]
-        szSource[bh_1.i, bh_1.j, i] = qex
-        if bh_head < bh_1.zly[i]:
-          msg = f"WARNING: Head in bore hole \"{bh_1.name}\" has fallen to {bh_head:7.3f} m, below the bottom of layer no. {i} "\
-                "({bh_1.zly[i]:7.3f} m) at {sz_time}! The flow from this layer into the bore hole will be overestimated."
-          # If this is an issue then an iterative approach for finding the solution is required, like in the 1st version of this plugin!
-          ms.wm.log(msg)
-  else:
-    bh_head = float("NaN")
-  
-  bh_1.heads.append(bh_head)
-  bh_1.times.append(sz_time)
-  
-  ms.wm.print(f"bh_head:   {bh_head:10.3f} m")
-  l_per_m3 = 1000
-  for head, flux in zip(sz_heads[bh_1.i, bh_1.j], szSource[bh_1.i, bh_1.j]):
-    ms.wm.print(f"head: {head:10.3f} m, flux {flux * l_per_m3:10.3f} l/s")
-  ms.wm.print("")
+    if divisor > 0: # leakage to _any_ layer?
+      bh_head = dividend / divisor
+      for i in range(bh.n_lay):
+        if bh.leak[i] != 0:
+          # ex-flow for this layer/bh. Driving head _not_ limited to bottom of layer.
+          qex = (bh_head - sz_heads[bh.i, bh.j, i]) * bh.ex_area[i] * bh.leak[i]
+          szSource[bh.i, bh.j, i] = qex
+          if bh_head < bh.zly[i]:
+            msg = f"WARNING: Head in bore hole \"{bh.name}\" has fallen to {bh_head:7.3f} m, below the bottom of layer no. {i} "\
+                  f"({bh.zly[i]:7.3f} m) at {sz_time}! The flow from this layer into the bore hole will be overestimated."
+            # If this is an issue then an iterative approach for finding the solution is required, like in the 1st version of this plugin!
+            ms.wm.log(msg)
+    else:
+      bh_head = float("NaN")
+
+    bh.heads.append(bh_head)
+
+    ms.wm.print(f"bh_head:   {bh_head:10.3f} m")
+    l_per_m3 = 1000
+    for head, flux in zip(sz_heads[bh.i, bh.j], szSource[bh.i, bh.j]):
+      ms.wm.print(f"head: {head:10.3f} m, flux {flux * l_per_m3:10.3f} l/s")
+    ms.wm.print("")
+  times.append(sz_time)
   ms.wm.setValues(szSource)
 
 def preLeaveSimulator():
   preTimeStep() # capture end of last time step
   title = "Open bore hole heads"
-  items = [mikeio.ItemInfo(f"Head {bh_1.name}", itemtype=mikeio.EUMType.Water_Level)]
+  items = [mikeio.ItemInfo(f"Head {bh.name}", itemtype=mikeio.EUMType.Water_Level) for bh in bhs]
   fname = os.path.join(setup_dir, f"{setup_name}.she - Result Files/{setup_name}_BoreHoleHeads.dfs0")
 
   dfs = mikeio.Dfs0()
   dfs.write(
-    filename=fname,
-    data=[bh_1.heads],
-    datetimes=bh_1.times,
-    items=items,
-    title=title,
+    filename = fname,
+    data = [bh.heads for bh in bhs],
+    datetimes = times,
+    items = items,
+    title = title,
   )
