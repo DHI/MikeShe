@@ -97,10 +97,13 @@ import numpy as np
 import textwrap as tw
 import csv
 import sys
+sys.path.append(r"C:\Users\uha\Documents\DHIGitHub\mikeio")
 import mikeio
 
 COL_CNT_CFG = 6
 flow_distance_cell_ratio = 0.4
+
+L_PER_M3 = 1000
 
 class BoreHole:
   def __init__(self, name, x, y, d, zlyg, leak):
@@ -115,6 +118,38 @@ class BoreHole:
     self.d_bh = d # bore hole diameter
     self.ex_area = [dz * math.pi * self.d_bh for dz in self.dz_ly] # bore hole to SZ contact area
     self.heads = []
+
+  def update_flux_head(self, sz_heads, sz_time):
+    dividend = 0
+    divisor  = 0
+    for i in range(self.n_lay):
+      if self.leak[i] != 0:
+        dividend += sz_heads[self.i, self.j, i] * self.ex_area[i] * self.leak[i]
+        divisor  +=                           self.ex_area[i] * self.leak[i]
+
+    if divisor > 0: # leakage to _any_ layer?
+      bh_head = dividend / divisor
+      for i in range(self.n_lay):
+        if self.leak[i] != 0:
+          # ex-flow for this layer/bh. Driving head _not_ limited to bottom of layer.
+          qex = (bh_head - sz_heads[self.i, self.j, i]) * self.ex_area[i] * self.leak[i]
+          szSource[self.i, self.j, i] = qex
+          if bh_head < self.zly[i]:
+            msg = f"WARNING: Head in bore hole \"{self.name}\" has fallen to {bh_head:7.3f} m, below the bottom of layer no. {i} "\
+                  f"({self.zly[i]:7.3f} m) at {sz_time}! The flow from this layer into the bore hole will be overestimated."
+            # If this is an issue then an iterative approach for finding the solution is required, like in the 1st version of this plugin!
+            ms.wm.log(msg)
+    else:
+      bh_head = float("NaN")
+
+    self.heads.append(bh_head)
+
+    ms.wm.print(f"bh_head \"{self.name}\":   {bh_head:10.3f} m")
+    l = 1
+    for head, flux in zip(sz_heads[self.i, self.j], szSource[self.i, self.j]):
+      ms.wm.print(f"    GW layer {l:3} - head: {head:10.3f} m, flux {flux * L_PER_M3:10.3g} l/s")
+      l += 1
+    ms.wm.print("")
 
   def __repr__(self):
     return __str__()
@@ -149,6 +184,7 @@ def postEnterSimulator():
   global times
   global setup_dir
   global setup_name
+  global szSource
   # general values:
   bhs = []
   times = []
@@ -164,7 +200,7 @@ def postEnterSimulator():
   zgt = zg[..., None] # For ground elevations [x, y] add z dimension (with extent 1) for layer thickness calculation
   zlyg = np.concatenate([zly, zgt], 2) # Layer bottoms and ground elevation combined
   _, _, kh = ms.wm.getValues(ms.paramTypes.SZ_K_HOR) # Assuming k_f is static! Potentially it could be modified during run time via the api.
-  
+
   cfg_path = os.path.join(setup_dir, "openBoreHoles.txt")
   if not os.path.exists(cfg_path):
     raise ValueError(f"Looking for bore hole cfg file \"{cfg_path}\", but it does not exist!")
@@ -196,7 +232,8 @@ def postEnterSimulator():
         leak = [khl / (flow_distance_cell_ratio * dx) for khl in kh[i, j]] # leakage in this SZ column
         bh = BoreHole(bh_name, bh_x, bh_y, bh_d, zlyg[i,j], leak)
         ms.wm.print(bh)
-        bhs.append(bh)
+        bhs.append(bh)  
+  szSource = ms.dataset(ms.paramTypes.SZ_SOURCE)
 
 def preTimeStep():
   _, sz_time, sz_heads = ms.wm.getValues(ms.paramTypes.SZ_HEAD) # sz_time and heads are from the end of the previous time step!
@@ -204,39 +241,8 @@ def preTimeStep():
     return
 
   ms.wm.print(f"\r\n\r\n########### {sz_time} ########################")
-  szSource = ms.dataset(ms.paramTypes.SZ_SOURCE)
   for bh in bhs:
-    dividend = 0
-    divisor  = 0
-    for i in range(bh.n_lay):
-      if bh.leak[i] != 0:
-        dividend += sz_heads[bh.i, bh.j, i] * bh.ex_area[i] * bh.leak[i]
-        divisor  +=                           bh.ex_area[i] * bh.leak[i]
-
-    if divisor > 0: # leakage to _any_ layer?
-      bh_head = dividend / divisor
-      for i in range(bh.n_lay):
-        if bh.leak[i] != 0:
-          # ex-flow for this layer/bh. Driving head _not_ limited to bottom of layer.
-          qex = (bh_head - sz_heads[bh.i, bh.j, i]) * bh.ex_area[i] * bh.leak[i]
-          szSource[bh.i, bh.j, i] = qex
-          if bh_head < bh.zly[i]:
-            msg = f"WARNING: Head in bore hole \"{bh.name}\" has fallen to {bh_head:7.3f} m, below the bottom of layer no. {i} "\
-                  f"({bh.zly[i]:7.3f} m) at {sz_time}! The flow from this layer into the bore hole will be overestimated."
-            # If this is an issue then an iterative approach for finding the solution is required, like in the 1st version of this plugin!
-            ms.wm.log(msg)
-    else:
-      bh_head = float("NaN")
-
-    bh.heads.append(bh_head)
-
-    ms.wm.print(f"bh_head \"{bh.name}\":   {bh_head:10.3f} m")
-    l_per_m3 = 1000
-    l = 1
-    for head, flux in zip(sz_heads[bh.i, bh.j], szSource[bh.i, bh.j]):
-      ms.wm.print(f"    GW layer {l:3} - head: {head:10.3f} m, flux {flux * l_per_m3:10.3g} l/s")
-      l += 1
-    ms.wm.print("")
+    bh.update_flux_head(sz_heads, sz_time)
   times.append(sz_time)
   ms.wm.setValues(szSource)
 
