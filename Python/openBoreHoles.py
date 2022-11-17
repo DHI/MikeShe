@@ -194,14 +194,12 @@ def postEnterSimulator():
         ms.wm.log(f"i={i}, j={j}")
         ms.wm.log(kh)
         leak = [khl / (flow_distance_cell_ratio * dx) for khl in kh[i, j]] # leakage in this SZ column
-        if not ms.wm.gridIsInternal(i, j):
-          raise ValueError(f"Cannot create borehole at {bh1_coords} which is outside the model area!")
         bh = BoreHole(bh_name, bh_x, bh_y, bh_d, zlyg[i,j], leak)
         ms.wm.print(bh)
         bhs.append(bh)
 
 def preTimeStep():
-  _, sz_time, sz_heads = ms.wm.getValues(ms.paramTypes.SZ_HEAD) # sz_time is from previous time step, as are the heads!
+  _, sz_time, sz_heads = ms.wm.getValues(ms.paramTypes.SZ_HEAD) # sz_time and heads are from the end of the previous time step!
   if(sz_time is None): # Not an SZ time step
     return
 
@@ -232,10 +230,12 @@ def preTimeStep():
 
     bh.heads.append(bh_head)
 
-    ms.wm.print(f"bh_head:   {bh_head:10.3f} m")
+    ms.wm.print(f"bh_head \"{bh.name}\":   {bh_head:10.3f} m")
     l_per_m3 = 1000
+    l = 1
     for head, flux in zip(sz_heads[bh.i, bh.j], szSource[bh.i, bh.j]):
-      ms.wm.print(f"head: {head:10.3f} m, flux {flux * l_per_m3:10.3f} l/s")
+      ms.wm.print(f"    GW layer {l:3} - head: {head:10.3f} m, flux {flux * l_per_m3:10.3g} l/s")
+      l += 1
     ms.wm.print("")
   times.append(sz_time)
   ms.wm.setValues(szSource)
@@ -243,7 +243,7 @@ def preTimeStep():
 def preLeaveSimulator():
   preTimeStep() # capture end of last time step
   title = "Open bore hole heads"
-  items = [mikeio.ItemInfo(f"Head {bh.name}", itemtype=mikeio.EUMType.Water_Level) for bh in bhs]
+  items = [mikeio.ItemInfo(f"Head \"{bh.name}\"", itemtype=mikeio.EUMType.Water_Level) for bh in bhs]
   fname = os.path.join(setup_dir, f"{setup_name}.she - Result Files/{setup_name}_BoreHoleHeads.dfs0")
 
   dfs = mikeio.Dfs0()
