@@ -178,12 +178,12 @@ class BoreHole:
       if self.bot > ly_top: # If bore hole does not extend into this layer there cannot be any exchange
         continue
 
-      sz_head = sz_heads[self.i, self.j, ly]
+      sz_head_eff = max(sz_heads[self.i, self.j, ly], self.bot) # Driving head must not consider SZ head below bottom of BH
 
       # Find the top and bottom of contact between BH and SZ water.
       # Top of contact range cannot be above:
       ctc_top_bh = min(self.top, ly_top, max(self.bot, self.head)) # max(...): self.head should never be below bottom, but for extra safety...
-      ctc_top_sz = min(self.top, ly_top, sz_head)
+      ctc_top_sz = min(self.top, ly_top, sz_head_eff)
 
       ctc_bot = max(self.bot, ly_bot) # the same for SZ and BH!
 
@@ -191,8 +191,8 @@ class BoreHole:
       contact_thick = (ctc_top_bh + ctc_top_sz) / 2 - ctc_bot
       contact_thick = max(contact_thick, 0)
       area_eff = self.ex_area[ly] * contact_thick / self.dz_ly[ly] # 0..1 fraction of full contact area
-      bh_head_eff = max(self.head, ly_bot) # limit BH head to >= bottom of layer
-      flo = (bh_head_eff - sz_head) * area_eff * self.leaks[ly]
+      bh_head_eff = max(self.head, ly_bot)  # Driving head must not consider BH head below bottom of layer
+      flo = (bh_head_eff - sz_head_eff) * area_eff * self.leaks[ly]
       sz_source[self.i, self.j, ly] = flo
       flo_sum += flo
     return flo_sum
@@ -216,9 +216,9 @@ class BoreHole:
       self.head_last = tmp
       self.flo_sum_last = self.flo_sum
     if its + 1 == MAX_ITER:
-      msg = f"WARNING {sz_time}: Max. number of {MAX_ITER} iterations in bore hole \"{self.name}\", "\
+      msg = f"WARNING ({sz_time}): Max. number of {MAX_ITER} iterations in bore hole \"{self.name}\", "\
             f"remaining net exchange flow of {self.flo_sum * L_PER_M3:7.3g} l/s "\
-            f"is above threshold of {EPS * L_PER_M3:7.3g} l/s and will cause a water balance error! New head is {self.head:7.3f} m."
+            f"is above threshold of {EPS * L_PER_M3:7.3g} l/s and will cause a water balance error! New (inaccurate) BH head is {self.head:7.3f} m."
       ms.wm.log(msg)
 
   def update_flux_head(self, sz_heads, sz_time):
