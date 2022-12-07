@@ -164,7 +164,7 @@ class BoreHole:
     else:
       self.head = float("NaN")
     
-  def __sum_flow(self, sz_heads):
+  def __sum_flow(self, head, sz_heads):
     flo_sum = 0
     for ly in range(self.n_lay):
       if self.leaks[ly] == 0:
@@ -182,7 +182,7 @@ class BoreHole:
 
       # Find the top and bottom of contact between BH and SZ water.
       # Top of contact range cannot be above:
-      ctc_top_bh = min(self.top, ly_top, max(self.bot, self.head)) # max(...): self.head should never be below bottom, but for extra safety...
+      ctc_top_bh = min(self.top, ly_top, max(self.bot, head)) # max(...): head should never be below bottom, but for extra safety...
       ctc_top_sz = min(self.top, ly_top, sz_head_eff)
 
       ctc_bot = max(self.bot, ly_bot) # the same for SZ and BH!
@@ -191,7 +191,7 @@ class BoreHole:
       contact_thick = (ctc_top_bh + ctc_top_sz) / 2 - ctc_bot
       contact_thick = max(contact_thick, 0)
       area_eff = self.ex_area[ly] * contact_thick / self.dz_ly[ly] # 0..1 fraction of full contact area
-      bh_head_eff = max(self.head, ly_bot)  # Driving head must not consider BH head below bottom of layer
+      bh_head_eff = max(head, ly_bot)  # Driving head must not consider BH head below bottom of layer
       flo = (bh_head_eff - sz_head_eff) * area_eff * self.leaks[ly]
       sz_source[self.i, self.j, ly] = flo
       flo_sum += flo
@@ -201,20 +201,30 @@ class BoreHole:
     ms.wm.print(" iteration              head         head_last          flow_sum      flo_sum_last")
     ms.wm.print("                         (m)               (m)             (l/s)             (l/s)")
     if math.isnan(self.flo_sum): # start of simulation - create starting point for iterations
-      self.flo_sum_last = self.__sum_flow(sz_heads)
+      self.flo_sum_last = self.__sum_flow(self.head, sz_heads)
       self.__closed_solution(sz_heads, sz_time, silent=True)
     for its in range(MAX_ITER):
-      self.flo_sum = self.__sum_flow(sz_heads)
-      ms.wm.print("{:10g} {:17.7g} {:17.7g} {:17.4g} {:17.4g}".format(its, self.head, self.head_last, self.flo_sum * L_PER_M3, self.flo_sum_last * L_PER_M3))
+      self.flo_sum = self.__sum_flow(self.head, sz_heads)
       tmp = self.head
       if abs(self.flo_sum) < EPS: # solution good enough?
+        if its == 0:
+          ms.wm.print(" (no iterations required)")
         its -= 1 # to save another EPS check for warning below
         self.flo_sum_last = self.flo_sum
         break
+      # In the first iteration in a time step flo_sum_last has been calculated with the sz heads of last time step. When
+      # sz heads have changed, flo_sum_last is now more or less incorrect. This can throw off solution finding.
+      # Therefore update flo_sum_last in the first iteration:
+      if its == 0:
+        self.flo_sum_last = self.__sum_flow(self.head_last, sz_heads)
+      self.flo_sum = self.flo_sum_last
       self.head = self.head - (self.head - self.head_last) / (self.flo_sum - self.flo_sum_last) * (self.flo_sum) # secant method
-      self.head = max(self.head, self.bot) # BH head below bottom end is invalid
+
+      # BH head below bottom end is invalid
+      self.head = max(self.head, self.bot)
       self.head_last = tmp
       self.flo_sum_last = self.flo_sum
+      ms.wm.print("{:10g} {:17.7g} {:17.7g} {:17.4g} {:17.4g}".format(its + 1, self.head, self.head_last, self.flo_sum * L_PER_M3, self.flo_sum_last * L_PER_M3))
     if its + 1 == MAX_ITER:
       msg = f"WARNING ({sz_time}): Max. number of {MAX_ITER} iterations in bore hole \"{self.name}\", "\
             f"remaining net exchange flow of {self.flo_sum * L_PER_M3:7.3g} l/s "\
@@ -267,6 +277,10 @@ def postEnterSimulator():
   global setup_dir
   global setup_name
   global sz_source
+
+  # set floating point exception handling to raise an error for overflow, 0-divide and invalid operations
+  np.seterr(divide='raise', over='raise', invalid='raise')
+
   # general values:
   bhs = []
   times = []
