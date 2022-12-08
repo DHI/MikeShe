@@ -217,7 +217,6 @@ class BoreHole:
       # Therefore update flo_sum_last in the first iteration:
       if its == 0:
         self.flo_sum_last = self.__sum_flow(self.head_last, sz_heads)
-      self.flo_sum = self.flo_sum_last
       self.head = self.head - (self.head - self.head_last) / (self.flo_sum - self.flo_sum_last) * (self.flo_sum) # secant method
 
       # BH head below bottom end is invalid
@@ -232,16 +231,16 @@ class BoreHole:
       ms.wm.log(msg)
 
   def update_flux_head(self, sz_heads, sz_time):
+    ms.wm.print(f"bh_head \"{self.name}\"")
     # Activate either one of these solution methods:
     # self.__closed_solution(sz_heads, sz_time)
     self.__iterative_solution(sz_heads, sz_time)
     self.heads.append(self.head)
 
-    ms.wm.print(f"bh_head \"{self.name}\":   {self.head:10.3f} m")
     l = 1
-    for head, flux in zip(sz_heads[self.i, self.j], sz_source[self.i, self.j]):
-      ms.wm.print(f"    GW layer {l:3} - head: {head:10.3f} m, flux {flux * L_PER_M3:10.3g} l/s")
-      l += 1
+    # for head, flux in zip(sz_heads[self.i, self.j], sz_source[self.i, self.j]):
+    #   ms.wm.print(f"    GW layer {l:3} - head: {head:10.3f} m, flux {flux * L_PER_M3:10.3g} l/s")
+    #   l += 1
 
   def __repr__(self):
     return __str__()
