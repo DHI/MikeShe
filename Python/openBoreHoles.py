@@ -11,7 +11,7 @@
 # - gauging bore holes with small diameter
 # - open at the top, no source/sink (pumping) applied
 # - connected to sz layers (leakage coefficient specified)
-# 
+#
 # Desired Results:
 # - Exchange flow between each SZ layer and the bore hole
 # - Resulting head in the bore hole
@@ -28,8 +28,8 @@
 #       k_f: hydr. conductivity
 #       r_1, r_2: distance locations 1 and 2 from bore hole
 #       r_1, r_2: distance locations 1 and 2 from bore hole
-#   In order to use this equation we'd need 2 points outside the well with known head and distance to the well. Potentially we could use neighbouring grid cells, 
-#     or there may be other formulations allowing to use just a single head, or maybe it does not even make a huge difference - this could be investigated 
+#   In order to use this equation we'd need 2 points outside the well with known head and distance to the well. Potentially we could use neighbouring grid cells,
+#     or there may be other formulations allowing to use just a single head, or maybe it does not even make a huge difference - this could be investigated
 #     in the future.
 #
 # Reasoning: The flow in the bore hole is very fast compared to the SZ flow. If the pressure distribution in the SZ changes,
@@ -39,7 +39,7 @@
 # Two different approaches are implemented to find the head:
 #   1.: A closed equation with some limitations regarding accuracy, but quick to program and to execute
 #   2.: An iterative solution - more correct, but less efficient
-# Both methods can be used, change the source code below: Activate the desired method call in method update_flux_head. Note: The iterative 
+# Both methods can be used, change the source code below: Activate the desired method call in method update_flux_head. Note: The iterative
 #   method calls the closed solution for a starting point.
 #
 # The closed solution:
@@ -65,44 +65,44 @@
 #########################################################
 #
 # Leakage coefficient, conductivity and flow distance
-# 
+#
 # The leakage coefficient can be interpreted as an abstraction of the hydr. conductivity k_f and the flow distance (let's call it df).
 # leakge = k_f / df.
 # It is not trivial to chose df.
-# For simplicity let's assume this: The head in a cell is an average of the sub-cell distribution. If water is going into or out of the bore hole a cone will form around the cell center=bore hole location. The average cell head will represent the actual value everywhere on a circle around the center where the circle covers half the area of the cell. Such a circle has a radius of about 0.4 times the cell size, so let's use this for the flow distance (see variable FLOW_DISTANCE_CELL_RATIO).
+#
+#   For simplicity let's assume this: The head in a cell is an average of the sub-cell distribution. If water is going into or out of the bore hole
+# a cone will form around the cell center=bore hole location. The average cell head will represent the actual value everywhere on a circle around
+# the center where the circle covers half the area of the cell. Such a circle has a radius of about 0.4 times the cell size, so let's use this for
+# the flow distance (see variable FLOW_DISTANCE_CELL_RATIO).
 #
 #########################################################
 #
 # Current Limitations and Omissions
 #
 #### General:
-# UZ inclusion:
-#   Due to a bug in MIKE SHE the plugin in the current form does not work with MIKE versions before Rel2023 if UZ is included and does have a shorter time step than SZ.
-#
 # Timing:
-#   Due to the explicit coupling of the bore hole to the SZ (the bore hole exchange and the SZ solver are executed one after the other) the exchange flows are 
-#   based on the heads of the _previous_ SZ time step. The only way to change this would be to integrate the bore hole exchange directly into the SZ solver. 
-#   Usually we don't even do this for components inside mshe. If a better temporal resolution is required, the time step length should be reduced.
+#   Due to the explicit coupling of the bore hole to the SZ (the bore hole exchange and the SZ solver are executed one after the other) the exchange flows are
+#   based on the heads of the _previous_ SZ time step. If a better temporal resolution is required, the time step length should be reduced.
 #
 # Custom result folder:
 #   Not currently supported - not provided by MShePy, result folder needed for reading SZ layer bottoms.
 #
 # Memory:
-#   Currently all data for the bore hole dfs0 file is collected over the entire simulation to be written at the very end. 
+#   Currently all data for the bore hole dfs0 file is collected over the entire simulation to be written at the very end.
 #   This may or may not become a problem with many bore holes, short SZ time steps and long simulations.
 #
 #### Limitations closed solution:
-# Exchange area: 
-#   The exchange area is static, assuming that flow is through the entire depth of each layer. 
-#   This is of course not always the case, especially for the top layer. The exchange area should be updated dynamically 
+# Exchange area:
+#   The exchange area is static, assuming that flow is through the entire depth of each layer.
+#   This is of course not always the case, especially for the top layer. The exchange area should be updated dynamically
 #   where the layer is not fully submerged, e. g. using the average head of bore hole and layer (limited to within the layer thickness).
 #
 # Driving head:
-#   The driving head will be calculated using the bore hole head even if it is below the bottom of the layer. 
+#   The driving head will be calculated using the bore hole head even if it is below the bottom of the layer.
 #   However in this situation instead the elevation of the bottom of the layer should be used.
-#  
+#
 # Open length of bore hole:
-#   Each bore hole will extend from the bottom to the top of the model. A limited depth and a potential coating in the top layer(s) 
+#   Each bore hole will extend from the bottom to the top of the model. A limited depth and a potential coating in the top layer(s)
 #   are not taken into account.
 #
 
@@ -148,7 +148,7 @@ class BoreHole:
     for i in range(self.n_lay):
       if self.leaks[i] != 0:
         dividend += sz_heads[self.i, self.j, i] * self.ex_area[i] * self.leaks[i]
-        divisor  +=                           self.ex_area[i] * self.leaks[i]
+        divisor  +=                               self.ex_area[i] * self.leaks[i]
 
     if divisor > 0: # leakage to _any_ layer?
       self.head = dividend / divisor
@@ -163,8 +163,8 @@ class BoreHole:
             ms.wm.log(msg)
     else:
       self.head = float("NaN")
-    
-  def __sum_flow(self, head, sz_heads):
+
+  def __calc_flow(self, head, sz_heads):
     flo_sum = 0
     for ly in range(self.n_lay):
       if self.leaks[ly] == 0:
@@ -180,50 +180,59 @@ class BoreHole:
 
       sz_head_eff = max(sz_heads[self.i, self.j, ly], self.bot) # Driving head must not consider SZ head below bottom of BH
 
-      # Find the top and bottom of contact between BH and SZ water.
+      # Find the top and bottom of contact between BH and SZ.
+      # - ctc_bh is the length whith water in the bore hole in this layer
+      # - ctc_sz is the depth whith water in this sz layer (in contact with bh)
       # Top of contact range cannot be above:
       ctc_top_bh = min(self.top, ly_top, max(self.bot, head)) # max(...): head should never be below bottom, but for extra safety...
       ctc_top_sz = min(self.top, ly_top, sz_head_eff)
 
       ctc_bot = max(self.bot, ly_bot) # the same for SZ and BH!
 
+      ctc_bh = max(ctc_top_bh - ctc_bot, 0)
+      ctc_sz = max(ctc_top_sz - ctc_bot, 0)
+
       # Setting the contact range to half way between the WLs is really to account for head diff increasing from 0 to full head diff between WL of bh and WL of SZ
-      contact_thick = (ctc_top_bh + ctc_top_sz) / 2 - ctc_bot
-      contact_thick = max(contact_thick, 0)
+      contact_thick = (ctc_bh + ctc_sz) / 2
+
       area_eff = self.ex_area[ly] * contact_thick / self.dz_ly[ly] # 0..1 fraction of full contact area
       bh_head_eff = max(head, ly_bot)  # Driving head must not consider BH head below bottom of layer
       flo = (bh_head_eff - sz_head_eff) * area_eff * self.leaks[ly]
       sz_source[self.i, self.j, ly] = flo
       flo_sum += flo
     return flo_sum
-    
+
   def __iterative_solution(self, sz_heads, sz_time):
     ms.wm.print(" iteration              head         head_last          flow_sum      flo_sum_last")
     ms.wm.print("                         (m)               (m)             (l/s)             (l/s)")
     if math.isnan(self.flo_sum): # start of simulation - create starting point for iterations
-      self.flo_sum_last = self.__sum_flow(self.head, sz_heads)
+      self.flo_sum_last = self.__calc_flow(self.head, sz_heads)
       self.__closed_solution(sz_heads, sz_time, silent=True)
+
     for its in range(MAX_ITER):
-      self.flo_sum = self.__sum_flow(self.head, sz_heads)
+      self.flo_sum = self.__calc_flow(self.head, sz_heads)
       tmp = self.head
       if abs(self.flo_sum) < EPS: # solution good enough?
-        if its == 0:
-          ms.wm.print(" (no iterations required)")
+        ms.wm.print("{:10g} {:17.7g} {:17.7g} {:17.4g} {:17.4g}".format(its, self.head, self.head_last, self.flo_sum * L_PER_M3, self.flo_sum_last * L_PER_M3))
         its -= 1 # to save another EPS check for warning below
-        self.flo_sum_last = self.flo_sum
         break
       # In the first iteration in a time step flo_sum_last has been calculated with the sz heads of last time step. When
       # sz heads have changed, flo_sum_last is now more or less incorrect. This can throw off solution finding.
       # Therefore update flo_sum_last in the first iteration:
       if its == 0:
-        self.flo_sum_last = self.__sum_flow(self.head_last, sz_heads)
+        self.flo_sum_last = self.__calc_flow(self.head_last, sz_heads)
+      if (self.head > self.head_last) != (self.flo_sum > self.flo_sum_last):
+        msg = f"ERROR {sz_time}, {self.name}: Exchange flow sum curve not monotonous"
+        ms.wm.log(msg)
+        ms.wm.print(msg)
+        ms.wm.log(self)
+      ms.wm.print("{:10g} {:17.7g} {:17.7g} {:17.4g} {:17.4g}".format(its, self.head, self.head_last, self.flo_sum * L_PER_M3, self.flo_sum_last * L_PER_M3))
       self.head = self.head - (self.head - self.head_last) / (self.flo_sum - self.flo_sum_last) * (self.flo_sum) # secant method
 
-      # BH head below bottom end is invalid
+      # BH head below bottom end is invalid, also breaks secant because it has no further impact on exchange flow
       self.head = max(self.head, self.bot)
       self.head_last = tmp
       self.flo_sum_last = self.flo_sum
-      ms.wm.print("{:10g} {:17.7g} {:17.7g} {:17.4g} {:17.4g}".format(its + 1, self.head, self.head_last, self.flo_sum * L_PER_M3, self.flo_sum_last * L_PER_M3))
     if its + 1 == MAX_ITER:
       msg = f"WARNING ({sz_time}): Max. number of {MAX_ITER} iterations in bore hole \"{self.name}\", "\
             f"remaining net exchange flow of {self.flo_sum * L_PER_M3:7.3g} l/s "\
@@ -232,19 +241,21 @@ class BoreHole:
 
   def update_flux_head(self, sz_heads, sz_time):
     ms.wm.print(f"bh_head \"{self.name}\"")
-    # Activate either one of these solution methods:
-    # self.__closed_solution(sz_heads, sz_time)
-    self.__iterative_solution(sz_heads, sz_time)
-    self.heads.append(self.head)
-
-    l = 1
-    # for head, flux in zip(sz_heads[self.i, self.j], sz_source[self.i, self.j]):
-    #   ms.wm.print(f"    GW layer {l:3} - head: {head:10.3f} m, flux {flux * L_PER_M3:10.3g} l/s")
-    #   l += 1
+    try:
+      # Activate either one of these solution methods:
+      # self.__closed_solution(sz_heads, sz_time)
+      self.__iterative_solution(sz_heads, sz_time)
+      self.heads.append(self.head)
+    except:
+      l = 1
+      for head, flux in zip(sz_heads[self.i, self.j], sz_source[self.i, self.j]):
+        ms.wm.print(f"    GW layer {l:3} - head: {head:10.3f} m, flux {flux * L_PER_M3:10.3g} l/s")
+        l += 1
+      raise
 
   def __repr__(self):
     return __str__()
-      
+
   def __str__(self):
     x, y = ms.wm.gridCellToCoord(self.i, self.j)
     return tw.dedent(f"""\
@@ -255,7 +266,7 @@ class BoreHole:
         dz_ly:   [{', '.join(f'{x:9.4g}' for x in self.dz_ly)}]
         leak:    [{', '.join(f'{x:9.4g}' for x in self.leaks)}]
         ex_area: [{', '.join(f'{x:9.4g}' for x in self.ex_area)}]""")
-    
+
 def read_layer_bottoms():
   # For now assume default result folder is being used. For extra safety we could check for a custom result folder in the she file, target "SYSTEM":
   #[SYSTEM]
@@ -324,14 +335,14 @@ def postEnterSimulator():
         if bh_bot > bh_top:
           msg = f"Cannot create borehole \"{bh_name}\" with the top end below the bottom end!\n"
           raise ValueError(msg)
-        i, j = ms.wm.gridCoordToCell(bh_x, bh_y)
-        if not ms.wm.gridIsInternal(i, j):
+        j, k = ms.wm.gridCoordToCell(bh_x, bh_y)
+        if not ms.wm.gridIsInternal(j, k):
           msg = f"Cannot create borehole \"{bh_name}\" outside the model area!\n"\
-                f"  x={bh_x}, y={bh_y};  i={i}, j={j}"
+                f"  x={bh_x}, y={bh_y};  j={j}, k={k}"
           raise ValueError(msg)
-        ms.wm.log(f"i={i}, j={j}")
-        leaks = [khl / (FLOW_DISTANCE_CELL_RATIO * dx) for khl in kh[i, j]] # leakages in this SZ column
-        bh = BoreHole(bh_name, bh_x, bh_y, bh_d, bh_bot, bh_top, zlyg[i,j], leaks, sz_heads)
+        ms.wm.log(f"j={j}, k={k}")
+        leaks = [khl / (FLOW_DISTANCE_CELL_RATIO * dx) for khl in kh[j, k]] # leakages in this SZ column
+        bh = BoreHole(bh_name, bh_x, bh_y, bh_d, bh_bot, bh_top, zlyg[j,k], leaks, sz_heads)
         ms.wm.print(bh)
         bhs.append(bh)
 
