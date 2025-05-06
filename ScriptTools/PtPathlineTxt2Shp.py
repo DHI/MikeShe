@@ -22,22 +22,24 @@ def main(txtDir, refTime):
     txtItemCnt = 7
     txtPattern = os.path.join(txtDir, "PTPath_*.txt")
     txtFiles = glob.glob(txtPattern)
-    reHead = re.compile(' *ID +X\(meter\) +Y\(meter\) +LocZ +Z\(meter\) +Layer +Time\(day\)')
+    reHead = re.compile(r' *ID +X\(meter\) +Y\(meter\) +LocZ +Z\(meter\) +Layer +Time\(day\)')
 
     for txtFile in txtFiles:
-        shpPath = os.path.splitext(txtFile)[0]
-        i = 0
+        directory, fname = os.path.split(txtFile)
+        fname = os.path.splitext(fname)[0].replace('.', '_') # shp cannot handle '.' in file name
+        shpPath = os.path.join(directory, fname)
         txtSize = os.path.getsize(txtFile)
-        txtLineCnt = txtSize / 95. # 95 bytes per line, i.e. 93 printable + \r\n        
-        sys.stdout.write('\n\nProcessing "{0}"\n'.format(txtFile))
-        sys.stdout.flush()
+        bytesRead = 0
+        print(f'\nProcessing "{txtFile}"')
         with open(txtFile, 'r') as txt, shapefile.Writer(shpPath + "Points") as shpP, shapefile.Writer(shpPath + "Lines") as shpL:
             currentId = -1
             lineShp = []
             progLast = -1
+            i = 0
             for line in txt:
                 i += 1
-                prog = round(100. * i / txtLineCnt, 0)
+                bytesRead += len(line) + 1 # + 1: "\r" is stripped from the line, but "\n" is not
+                prog = round(100. * bytesRead / txtSize, 0)
                 if prog > progLast:
                     # print progress
                     sys.stdout.write('\r')
@@ -61,7 +63,9 @@ def main(txtDir, refTime):
                 shpP.pointz(x, y, z)
                 d = refTime + datetime.timedelta(days = float(items[6]))
                 shpP.record(ptId, d)
-                if currentId != ptId and currentId != -1:
+
+                # Flush line feature when complete, i. e. next feature begins or line is last in file
+                if (currentId != ptId or bytesRead >= txtSize) and currentId != -1: # >=: The last line should be terminated by a line break, but if it is not we have still added + 1 to bytesRead above!
                     if len(lineShp) > 1:
                         shpL.line([lineShp])
                         shpL.record(currentId)
@@ -69,7 +73,6 @@ def main(txtDir, refTime):
                 lineShp.append([x,y])
                 currentId = ptId
 
-    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", 
