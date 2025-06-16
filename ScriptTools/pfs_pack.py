@@ -21,8 +21,8 @@
 #                @="Stage PFS File"
 
 #                [HKEY_CLASSES_ROOT\*\shell\Stage PFS\Command]
-#                @="\"C:\\Program Files\\Python313\\python.exe\" \"C:\\Users\\ME_ME_ME\\scripts\\stage_pfs.py\" \"%1\""
-# Warranty: None. None at all. For nothing. Might eat your computer. And yourself.
+#                @="\"C:\\Program Files\\Python313\\python.exe\" \"C:\\Users\\ME_ME_ME\\scripts\\pfs_pack.py\" \"%1\""
+# Warranty: None whatsoever.
 # Author: DHI\uha
 # Date:   05/2025
 
@@ -36,6 +36,7 @@ import shutil
 import sys
 import traceback
 import xml.etree.ElementTree as ET
+import zipfile
 
 tab_file = 0
 
@@ -155,7 +156,7 @@ def collect_files(pfs_path: Path, mode: str, collected: Set[Path]) -> None:
   # print(collected)
 
 
-def create_staging_dir(master_pfs: Path, mode: str):
+def create_zip(master_pfs: Path, mode: str, out_path: str, force):
   master_pfs = master_pfs.resolve()
 
   if not is_pfs_file(master_pfs):
@@ -167,30 +168,37 @@ def create_staging_dir(master_pfs: Path, mode: str):
 
   # Compute common root across all files
   real_root = Path(os.path.commonpath([str(p) for p in all_paths]))
-
-  # Create staging root folder
-  staging_root = master_pfs.parent / (master_pfs.stem + "_staging")
-
-  # Copy files while preserving structure from real_root down
-  for file in all_paths:
-    try:
-      relative_path = file.relative_to(real_root)
-      if relative_path == Path("."):
-        relative_path = file.name
-    except ValueError:
-      continue  # skip if file is outside tree
-    dest = staging_root / relative_path
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if file.is_file():
-      shutil.copy2(file, dest)
-  print(f"Staging directory created at: {staging_root}")
+  
+  # creating zip file
+  if out_path is None:
+    zip_file = master_pfs.parent / (master_pfs.stem + ".zip")
+  
+  if os.path.isfile(zip_file) and not force:
+    answer = input(f"{zip_file} exists - overwrite? (y/n): ").strip().lower()
+    if answer not in ["y", "yes"]:
+      print("Skip writing output file")
+      return
+  with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+    for file in all_paths:
+      try:
+        relative_path = file.relative_to(real_root)
+        if relative_path == Path("."):
+          relative_path = file.name
+      except ValueError:
+        continue  # skip if file is outside tree
+      if file.is_file():
+        # shutil.copy2(file, dest)
+        zipf.write(file, relative_path)
+  print(f"Zip file created: {zip_file}")
 
 
 def parse_args():
-  parser = argparse.ArgumentParser(description="Stage a PFS file and its dependencies.")
+  parser = argparse.ArgumentParser(description="Stage a PFS file and its dependencies.") 
   parser.add_argument("pfs_path", nargs='?', type=str, help="Path to the main PFS file")
+  parser.add_argument("-o", "--output", type=str, help="Path to the output zip file")
   parser.add_argument("-m", "--minimum", action="store_true", help="Inlcude only currently used files")
   parser.add_argument("-a", "--all", action="store_true", help="Include all files, even if not currently used")
+  parser.add_argument("-f", "--force", action="store_true", help="Overwrite output if it already exists")
 
   args = parser.parse_args()
 
@@ -229,9 +237,10 @@ def parse_args():
 if __name__ == "__main__":
   import sys
   try:
+    print(sys.argv)
     args = parse_args()
     mode = "minimum" if args.minimum else "all"
-    create_staging_dir(Path(args.pfs_path), mode)
+    create_zip(Path(args.pfs_path), mode, args.output, args.force)
   except Exception as e:
     traceback.print_exc()
   input("\nPress Enter to exit...")
