@@ -1,8 +1,8 @@
-# Purpose:  Copy a pfs files and all files it references into a separate _stage directory. This can be used for sharing a model including all required files
+# Purpose:  Copy a pfs file and all files it references into a separate _stage directory. This can be used for sharing a model including all required files
 #           but not the entire directory with result files etc.
 #           - Made for .she files, but should work to a certain extent for other pfs files.
 #           - Pfs files referenced in the main pfs file will also be processed.
-#           - Referenced m1dx files will also be processed to some extent, also any .mupp and .sqlte files with the same base name as the m1dx file will be included.
+#           - Referenced .m1dx files will also be processed to some extent, also any .mupp and .sqlte files with the same base name as the .m1dx file will be included.
 #           - Referenced .shp files will bring their buddies along
 #           - Missing files will be reported, but not treated as errors
 #           - References to files outside the directory of the main pfs files are not recommended but should be handled correctly by placing the
@@ -142,7 +142,7 @@ def collect_files(pfs_path: Path, mode: str, collected: Set[Path]) -> None:
       for shp_related in find_shp_related_files(abs_ref):
         collected.add(shp_related)
     elif abs_ref.suffix.lower() == ".dll":
-      # Only case so far: The python installation dll referenced in the she file. No good to include that!
+      # Only case so far: The python installation dll referenced in the .she file. No good to include that!
       continue
     elif abs_ref.suffix.lower() not in ['.dfs0', '.dfs2', '.dfs3'] and is_pfs_file(abs_ref):
       if not abs_ref in collected:
