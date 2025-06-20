@@ -98,7 +98,7 @@ def find_m1dx_related_files(m1dx_path: Path) -> List[Path]:
     if strip_ns(elem.tag) == "Path" and elem.text:
       text = elem.text.strip()
       if text and not text.lower().endswith('.html'):
-        path = (m1dx_path.parent / Path(text)).resolve()
+        path = (m1dx_path.parent / Path(text))
         related.append(path)
     for child in elem:
       walk(child)
@@ -125,9 +125,9 @@ def find_shp_related_files(shp_path: Path) -> List[Path]:
 def collect_files(pfs_path: Path, mode: str, collected: Set[Path]) -> None:
   global tab_file
   pfs_obj = mikeio.pfs.read_pfs(pfs_path)
-  collected.add(pfs_path.resolve())
+  collected.add(pfs_path)
   for ref, breadcrumb in extract_file_references(pfs_obj, only_if_used=True):
-    abs_ref = (pfs_path.parent / ref).resolve()
+    abs_ref = (pfs_path.parent / ref)
     if not abs_ref.exists():
       print(tab_file * "  " + f"Missing file: {abs_ref} ({'/'.join(breadcrumb)})")
       continue
@@ -137,10 +137,10 @@ def collect_files(pfs_path: Path, mode: str, collected: Set[Path]) -> None:
         if not f.exists():
           print(tab_file * "  " + f"M1D-Missing file: {f}")
           continue
-        collected.add(f.resolve())
+        collected.add(f)
     elif abs_ref.suffix.lower() == ".shp":
       for shp_related in find_shp_related_files(abs_ref):
-        collected.add(shp_related.resolve())
+        collected.add(shp_related)
     elif abs_ref.suffix.lower() == ".dll":
       # Only case so far: The python installation dll referenced in the she file. No good to include that!
       continue
@@ -157,7 +157,7 @@ def collect_files(pfs_path: Path, mode: str, collected: Set[Path]) -> None:
 
 
 def create_zip(master_pfs: Path, mode: str, out_path: str, force):
-  master_pfs = master_pfs.resolve()
+  master_pfs = master_pfs
 
   if not is_pfs_file(master_pfs):
     raise ValueError(f'The file provided does not seem to be a valid pfs file:\n\t"{master_pfs}"')
