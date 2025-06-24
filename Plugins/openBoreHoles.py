@@ -1,7 +1,7 @@
 ########## MIKE SHE plugin for open bore holes ##########
 # Subject:      Simulate open bore holes, calculate exchange flows between SZ layers and the bore hole and the resulting head in the bore hole
 # Usage:        Attach to an MIKE SHE model as a plugin, adapt the few hard coded global variables (after imports)
-# Dependencies: mikeio
+# Dependencies: mikeio (which requires: numpy, scipy - these are also used here)
 # author:       uha@dhigroup.com
 # date:         10/2022
 #
@@ -39,8 +39,7 @@
 # Two different approaches are implemented to find the head:
 #   1.: A closed equation with some limitations regarding accuracy, but quick to program and to execute
 #   2.: An iterative solution - more correct, but less efficient
-# Both methods can be used, change the source code below: Activate the desired method call in method update_flux_head. Note: The iterative
-#   method calls the closed solution for a starting point.
+# Both methods can be used, change the source code below: Activate the desired method call in method update_flux_head.
 #
 # The closed solution:
 # The sum of all exchange flows bore hole-layer should be 0:
@@ -59,8 +58,8 @@
 #________________________________________________________
 #
 # The iterative solution:
-# In each iteration the sum of all exchange flows bore hole-layer is calculated - the target for this is 0. The head for the next iteration will
-# be calculated using the secant method. When abs value of the sum of flows is below the threshold (see constant EPS) the solution will be accepted.
+# Uses Brent's method from scipy. This is combining the bisection method, the secant method and inverse quadratic interpolation.
+# In each iteration the sum of all exchange flows bore hole-layer is calculated - the target for this is 0.
 
 #########################################################
 #
@@ -107,12 +106,13 @@
 #
 
 import MShePy as ms
-import math
-import os
-import numpy as np
-import textwrap as tw
 import csv
+import math
 import mikeio
+import numpy as np
+import os
+from scipy import optimize
+import textwrap as tw
 
 COL_CNT_CFG = 6
 FLOW_DISTANCE_CELL_RATIO = 0.4 # ()
@@ -137,10 +137,9 @@ class BoreHole:
     self.ex_area = [dz * math.pi * self.d_bh for dz in self.dz_ly] # bore hole to SZ contact area (assuming bh from top to bottom of layer)
     self.heads = [] # result storing
     self.head = zlyg[-1] # initial head at ground surface for start of iterations only
-    self.head_last = self.head
-    nan = float("NaN")
-    self.flo_sum = nan
-    self.flo_sum_last = nan
+    self.flow_cache = {} # For Brent's method we need to pre-calculate 2 starting points, cache these to avoid double-calculating
+    self.iterations = []
+    self.no_converge = 0
 
   def __closed_solution(self, sz_heads, sz_time, silent = False):
     dividend = 0
@@ -165,7 +164,10 @@ class BoreHole:
       self.head = float("NaN")
 
   def __calc_flow(self, head, sz_heads):
-    flo_sum = 0
+    if head in self.flow_cache:
+      return self.flow_cache[head]
+    # ms.wm.log("  head: ", head)
+    flow_sum = 0
     for ly in range(self.n_lay):
       if self.leaks[ly] == 0:
         continue
@@ -197,50 +199,42 @@ class BoreHole:
 
       area_eff = self.ex_area[ly] * contact_thick / self.dz_ly[ly] # 0..1 fraction of full contact area
       bh_head_eff = max(head, ly_bot)  # Driving head must not consider BH head below bottom of layer
-      flo = (bh_head_eff - sz_head_eff) * area_eff * self.leaks[ly]
-      sz_source[self.i, self.j, ly] = flo
-      flo_sum += flo
-    return flo_sum
+      flow = (bh_head_eff - sz_head_eff) * area_eff * self.leaks[ly]
+      sz_source[self.i, self.j, ly] = flow
+      flow_sum += flow
+    # ms.wm.log("  result: ", flow_sum)
+    self.flow_cache[head] = flow_sum
+    return flow_sum
 
   def __iterative_solution(self, sz_heads, sz_time):
-    ms.wm.print(" iteration              head         head_last          flow_sum      flo_sum_last")
-    ms.wm.print("                         (m)               (m)             (l/s)             (l/s)")
-    if math.isnan(self.flo_sum): # start of simulation - create starting point for iterations
-      self.flo_sum_last = self.__calc_flow(self.head, sz_heads)
-      self.__closed_solution(sz_heads, sz_time, silent=True)
+    flow_sum_a = self.__calc_flow(self.head, sz_heads)
 
-    for its in range(MAX_ITER):
-      self.flo_sum = self.__calc_flow(self.head, sz_heads)
-      tmp = self.head
-      if abs(self.flo_sum) < EPS: # solution good enough?
-        ms.wm.print("{:10g} {:17.7g} {:17.7g} {:17.4g} {:17.4g}".format(its, self.head, self.head_last, self.flo_sum * L_PER_M3, self.flo_sum_last * L_PER_M3))
-        its -= 1 # to save another EPS check for warning below
+    if flow_sum_a > 0:
+      add = -1
+    else:      
+      add = 1
+
+    add_last = 0
+    flow_sum_b = flow_sum_a
+
+    # Find starting point where sign of flow differs (required for scipy brent)
+    while True:
+      if (flow_sum_b * flow_sum_a) < 0:
         break
-      # In the first iteration in a time step flo_sum_last has been calculated with the sz heads of last time step. When
-      # sz heads have changed, flo_sum_last is now more or less incorrect. This can throw off solution finding.
-      # Therefore update flo_sum_last in the first iteration:
-      if its == 0:
-        self.flo_sum_last = self.__calc_flow(self.head_last, sz_heads)
-      if (self.head > self.head_last) != (self.flo_sum > self.flo_sum_last):
-        msg = f"ERROR {sz_time}, {self.name}: Exchange flow sum curve not monotonous"
-        ms.wm.log(msg)
-        ms.wm.print(msg)
-        ms.wm.log(self)
-      ms.wm.print("{:10g} {:17.7g} {:17.7g} {:17.4g} {:17.4g}".format(its, self.head, self.head_last, self.flo_sum * L_PER_M3, self.flo_sum_last * L_PER_M3))
-      self.head = self.head - (self.head - self.head_last) / (self.flo_sum - self.flo_sum_last) * (self.flo_sum) # secant method
+      self.head = self.head + add_last
+      add_last = add
+      flow_sum_b = self.__calc_flow(self.head + add, sz_heads)
+      add *= 2
+      if abs(add) >= 1024:
+        msg = f"Bore hole '{self.name}': Unable to find a pair of head values where the resulting flow is pos for one and neg for the other."
+        raise ValueError(msg)
 
-      # BH head below bottom end is invalid, also breaks secant because it has no further impact on exchange flow
-      self.head = max(self.head, self.bot)
-      self.head_last = tmp
-      self.flo_sum_last = self.flo_sum
-    if its + 1 == MAX_ITER:
-      msg = f"WARNING ({sz_time}): Max. number of {MAX_ITER} iterations in bore hole \"{self.name}\", "\
-            f"remaining net exchange flow of {self.flo_sum * L_PER_M3:7.3g} l/s "\
-            f"is above threshold of {EPS * L_PER_M3:7.3g} l/s and will cause a water balance error! New (inaccurate) BH head is {self.head:7.3f} m."
-      ms.wm.log(msg)
+    self.head, r = optimize.brentq(self.__calc_flow, self.head, self.head + add_last, rtol=EPS, args = sz_heads, maxiter = MAX_ITER, full_output=True, disp=False)
+    self.iterations.append(r.iterations)
+    if not r.converged:
+      self.no_converge += 1
 
   def update_flux_head(self, sz_heads, sz_time):
-    ms.wm.print(f"bh_head \"{self.name}\"")
     try:
       # Activate either one of these solution methods:
       # self.__closed_solution(sz_heads, sz_time)
@@ -248,6 +242,7 @@ class BoreHole:
       self.heads.append(self.head)
     except:
       l = 1
+      ms.wm.print(f"bh_head \"{self.name}\"")
       for head, flux in zip(sz_heads[self.i, self.j], sz_source[self.i, self.j]):
         ms.wm.print(f"    GW layer {l:3} - head: {head:10.3f} m, flux {flux * L_PER_M3:10.3g} l/s")
         l += 1
@@ -340,7 +335,6 @@ def postEnterSimulator():
           msg = f"Cannot create borehole \"{bh_name}\" outside the model area!\n"\
                 f"  x={bh_x}, y={bh_y};  j={j}, k={k}"
           raise ValueError(msg)
-        ms.wm.log(f"j={j}, k={k}")
         leaks = [khl / (FLOW_DISTANCE_CELL_RATIO * dx) for khl in kh[j, k]] # leakages in this SZ column
         bh = BoreHole(bh_name, bh_x, bh_y, bh_d, bh_bot, bh_top, zlyg[j,k], leaks, sz_heads)
         ms.wm.print(bh)
@@ -351,11 +345,12 @@ def preTimeStep():
   if(sz_time is None): # Not an SZ time step
     return
 
-  ms.wm.print(f"\r\n\r\n########### {sz_time} ########################")
+  # ms.wm.print(f"\r\n\r\n########### {sz_time} ########################")
   sz_source.value(0.0)
   for bh in bhs:
+    bh.flow_cache.clear()
     bh.update_flux_head(sz_heads, sz_time)
-    ms.wm.print("")
+    # ms.wm.print("")
   times.append(sz_time)
   ms.wm.setValues(sz_source)
 
@@ -365,11 +360,21 @@ def preLeaveSimulator():
   items = [mikeio.ItemInfo(f"Head \"{bh.name}\"", itemtype=mikeio.EUMType.Water_Level) for bh in bhs]
   fname = os.path.join(setup_dir, f"{setup_name}.she - Result Files/{setup_name}_BoreHoleHeads.dfs0")
 
-  dfs = mikeio.Dfs0()
-  dfs.write(
-    filename = fname,
+  ds = mikeio.Dataset(
     data = [bh.heads for bh in bhs],
-    datetimes = times,
-    items = items,
-    title = title,
+    time = times,
+    items = items
   )
+  ds.to_dfs(fname, title=title)
+
+  ms.wm.print("\r\nBore Hole Convergence Report\r\n============================")
+  for bh in bhs:
+    ms.wm.print(f"Bore hole '{bh.name}'")
+    itrs = np.array(bh.iterations)
+    ms.wm.print(f"  Solution above threshold count:   {bh.no_converge} ({bh.no_converge / len(itrs):.2%})")
+    ms.wm.print(f"  Average number of iterations:     {itrs.mean():.2}")
+    ms.wm.print(f"  Maximum number of iterations:     {itrs.max ()}")
+    ms.wm.print(f"  Standard deviation of iterations: {itrs.std ():.2}")
+    ms.wm.print(f"  Total number of iterations:       {itrs.sum ()}")
+  if any(bh.no_converge > 0 for bh in bhs):
+    ms.wm.log("\r\nBore hole plugin: Solution threshold exceeded, see print log file for more details.")
