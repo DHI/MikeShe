@@ -116,7 +116,11 @@ import textwrap as tw
 
 COL_CNT_CFG = 6
 FLOW_DISTANCE_CELL_RATIO = 0.4 # ()
-MAX_ITER  = 10 # max number of iterations
+
+# Max number of iterations in Brent's method. 
+#   NOTE 1: This does NOT include bracket finding which takes 2 or more iterations!
+#   NOTE 2: The solution may still be below the threshold, but selection of the best solution may be skipped!
+MAX_ITER  = 10
 EPS       = 1.0e-9 # (m^3/s) stop criterion, tolerance for remaining flow sum <> 0 of all layers<->bh
 L_PER_M3  = 1000 # (l/m^3)
 CFG_NAME = "openBoreHoles.txt"
@@ -138,8 +142,9 @@ class BoreHole:
     self.heads = [] # result storing
     self.head = zlyg[-1] # initial head at ground surface for start of iterations only
     self.flow_cache = {} # For Brent's method we need to pre-calculate 2 starting points, cache these to avoid double-calculating
-    self.iterations = []
-    self.no_converge = 0
+    self.iterations = [] # list of iterations per time step
+    self.no_converge = 0 # count of total non-convergences
+    self.its = 0         # counter for iterations within one time step
 
   def __closed_solution(self, sz_heads, sz_time, silent = False):
     dividend = 0
@@ -166,7 +171,8 @@ class BoreHole:
   def __calc_flow(self, head, sz_heads):
     if head in self.flow_cache:
       return self.flow_cache[head]
-    # ms.wm.log("  head: ", head)
+    self.its += 1
+
     flow_sum = 0
     for ly in range(self.n_lay):
       if self.leaks[ly] == 0:
@@ -202,37 +208,47 @@ class BoreHole:
       flow = (bh_head_eff - sz_head_eff) * area_eff * self.leaks[ly]
       sz_source[self.i, self.j, ly] = flow
       flow_sum += flow
-    # ms.wm.log("  result: ", flow_sum)
+    ms.wm.print(f"{self.its:10g} {head:.9f} {flow_sum * L_PER_M3:.4g}")
     self.flow_cache[head] = flow_sum
     return flow_sum
 
   def __iterative_solution(self, sz_heads, sz_time):
-    flow_sum_a = self.__calc_flow(self.head, sz_heads)
+    ms.wm.print(f"Bore hole '{self.name}'")
+    ms.wm.print(f"======================================")
+    ms.wm.print(" iteration   head         flow_sum")
+    ms.wm.print("              (m)            (l/s)")
+    self.its = 0
 
-    if flow_sum_a > 0:
+    flow_sum_0 = self.__calc_flow(self.head, sz_heads)
+
+    # If the flow from bore hole into SZ is positive we need to reduce the head to reach 0 flow - and vice versa.
+    # This should be ok even when going to/below the bottom of bore hole because this means SZ head is at/below bottom
+    # of the bore hole and the resulting flow is 0. In this case we have a valid bracket: f(flow_sum_1) == 0
+    if flow_sum_0 > 0:
       add = -1
-    else:      
+    else:
       add = 1
 
-    add_last = 0
-    flow_sum_b = flow_sum_a
-
-    # Find starting point where sign of flow differs (required for scipy brent)
+    # Find bracket, i. e. 2 starting points where sign of flow differs (required for scipy brent)
     while True:
-      if (flow_sum_b * flow_sum_a) < 0:
-        break
-      self.head = self.head + add_last
-      add_last = add
-      flow_sum_b = self.__calc_flow(self.head + add, sz_heads)
       add *= 2
-      if abs(add) >= 1024:
+      if abs(add) >= 1024: # A kilometer of head change and bracket still not found??? Something must be wrong, but I don't know what!
         msg = f"Bore hole '{self.name}': Unable to find a pair of head values where the resulting flow is pos for one and neg for the other."
         raise ValueError(msg)
+      flow_sum_1 = self.__calc_flow(self.head + add, sz_heads)
+      if (flow_sum_0 * flow_sum_1) <= 0: # bracket found?
+        break
+      self.head = self.head + add
 
-    self.head, r = optimize.brentq(self.__calc_flow, self.head, self.head + add_last, rtol=EPS, args = sz_heads, maxiter = MAX_ITER, full_output=True, disp=False)
-    self.iterations.append(r.iterations)
+    self.head, r = optimize.brentq(self.__calc_flow, self.head, self.head + add, rtol=EPS, args = sz_heads, maxiter = MAX_ITER, full_output=True, disp=False)
+    self.iterations.append(self.its)
+
+    flow_sum_0 = self.__calc_flow(self.head, sz_heads) # don't worry about performance doing this again, it's cached!
+    ms.wm.print(f"accepted:  {self.head:.9f} {flow_sum_0 * L_PER_M3:.4g}")
     if not r.converged:
       self.no_converge += 1
+      ms.wm.print(f"        *NO CONVERGENCE!*")
+    ms.wm.print(f"--------------------------------------\r\n")
 
   def update_flux_head(self, sz_heads, sz_time):
     try:
@@ -345,7 +361,7 @@ def preTimeStep():
   if(sz_time is None): # Not an SZ time step
     return
 
-  # ms.wm.print(f"\r\n\r\n########### {sz_time} ########################")
+  ms.wm.print(f"\r\n\r\n########### {sz_time} ########################")
   sz_source.value(0.0)
   for bh in bhs:
     bh.flow_cache.clear()
@@ -368,6 +384,7 @@ def preLeaveSimulator():
   ds.to_dfs(fname, title=title)
 
   ms.wm.print("\r\nBore Hole Convergence Report\r\n============================")
+  ms.wm.print("(Iteration count includes finding bracket and discarded iterations!)")
   for bh in bhs:
     ms.wm.print(f"Bore hole '{bh.name}'")
     itrs = np.array(bh.iterations)
