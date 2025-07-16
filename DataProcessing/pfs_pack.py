@@ -1,26 +1,27 @@
-# Purpose:  Copy a pfs file and all files it references into a separate _stage directory. This can be used for sharing a model including all required files
-#           but not the entire directory with result files etc.
+# Purpose:  Pack a pfs file and all files it references into a zip archive (default) or a staging directory. This can e. g.
+#           be used for sharing a model including all required files but not the entire directory with result files etc.
 #           - Made for .she files, but should work to a certain extent for other pfs files.
 #           - Pfs files referenced in the main pfs file will also be processed.
-#           - Referenced .m1dx files will also be processed to some extent, also any .mupp and .sqlte files with the same base name as the .m1dx file will be included.
+#           - Referenced .m1dx files will also be processed to some extent, also any .mupp, .sqlite and .cs files
+#             with the same base name as the .m1dx file will be included.
 #           - Referenced .shp files will bring their buddies along
 #           - Missing files will be reported, but not treated as errors
-#           - References to files outside the directory of the main pfs files are not recommended but should be handled correctly by placing the
-#             main pfs file in a sub[-sub[-sub[-sub]]] directory of the staging directory.
-#             Don't know what happens when you reference files on a different drive - try and report (if you still can after trying)!
+#           - References to files outside the directory of the main pfs files are not recommended but are handled
+#             by placing the main pfs file in a sub[-sub[-sub[-sub]]] directory of the staging directory.
+#             Don't know what happens when you reference files on a different drive - try and report!
 #           - .dll files will not be included
-# Requires: Python, mikeio, optionally tkinter (for file selection dialog)
-# Usage:    A: Run from console with or without arguments. For non-interactive mode specify all required arguments
+# Requires: mikeio, optionally tkinter (for file selection dialog)
+# Usage:    A: Run from console with or without arguments. For non-interactive mode specify all required arguments.
 #           B: Double click, navigate to pfs file... Requires that .py files are associated with a python interpreter on your system. tkinter installed with python gives you GUI file selection.
 #           C: Register as shell command, then right click any pfs file in Windows Explorer and select the command (Windows only)
 #              How? Save the following lines as a text file with .reg extension. Set the paths to your python installation and to where you placed this script. Then execute as administrator.
 #              (or edit the registry manually to add the below keys)
 #                Windows Registry Editor Version 5.00
 
-#                [HKEY_CLASSES_ROOT\*\shell\Stage PFS]
-#                @="Stage PFS File"
+#                [HKEY_CLASSES_ROOT\*\shell\Pack PFS]
+#                @="Pack PFS File"
 
-#                [HKEY_CLASSES_ROOT\*\shell\Stage PFS\Command]
+#                [HKEY_CLASSES_ROOT\*\shell\Pack PFS\Command]
 #                @="\"C:\\Program Files\\Python313\\python.exe\" \"C:\\Users\\ME_ME_ME\\scripts\\pfs_pack.py\" \"%1\""
 # Warranty: None whatsoever.
 # Author: DHI\uha
@@ -38,17 +39,25 @@ import traceback
 import xml.etree.ElementTree as ET
 import zipfile
 
-tab_file = 0
+tab_file = 0 # printing indentation
+IGNORE_BREADCRUMBS = [
+  ["MIKESHE_FLOWMODEL", "Results_Post_Processing", "RunStatistics"],
+  ["MIKESHE_WaterBalance", "Extraction_Step"],
+  ["MIKESHE_WaterBalance", "Postprocessing_Steps"]
+]
 
 def is_pfs_file(path: Path) -> bool:
   try:
     _ = mikeio.pfs.read_pfs(path)
     return True
-  except Exception:
+  except Exception as e:
+    # Some extensions are known to be pfs files, it is an error if those cannot be parsed!
+    if os.path.splitext(path)[1].lower() in [".etv", ".uzs", ".wel", ".wbl", ".sheres", ".mhydro", ".ecolab"]:
+      raise
     return False
 
 
-def extract_file_references(pfs_obj, only_if_used: bool) -> List[Path]:
+def extract_file_references(pfs_obj, include_all: bool) -> List[Path]:
   file_paths = []
 
   def dispatch_node(node, section_dict, breadcrumb):
@@ -62,8 +71,11 @@ def extract_file_references(pfs_obj, only_if_used: bool) -> List[Path]:
       process_value(node, section_dict, breadcrumb)
 
   def process_section(section_dict, breadcrumb):
-    if only_if_used and section_dict.get("IsDataUsedInSetup") == 0: # If tag does not exist we do want to continue processing!
+    if breadcrumb in IGNORE_BREADCRUMBS:
       return
+    if not include_all:
+      if section_dict.get("IsDataUsedInSetup") == 0: # If tag does not exist we do want to continue processing!    
+        return
     for key, val in section_dict.items():
       dispatch_node(val, section_dict, breadcrumb + [key])
 
@@ -72,6 +84,8 @@ def extract_file_references(pfs_obj, only_if_used: bool) -> List[Path]:
       dispatch_node(item, section_dict, breadcrumb + [f"[{i}]"])
 
   def process_value(val, section_dict, breadcrumb):
+    if breadcrumb in IGNORE_BREADCRUMBS:
+      return
     if isinstance(val, str):
       match = re.fullmatch(r'\|(.+)\|', val.strip())
       if match:
@@ -79,13 +93,12 @@ def extract_file_references(pfs_obj, only_if_used: bool) -> List[Path]:
         if filepath:
           file_paths.append((filepath, breadcrumb.copy()))
 
-  dispatch_node(pfs_obj.to_dict(), [], [])
+  dispatch_node(pfs_obj, [], [])
   return file_paths
 
 
 def find_m1dx_related_files(m1dx_path: Path) -> List[Path]:
   related = []
-  stop = [False]
 
   def strip_ns(tag):
     return tag.split('}')[-1] if '}' in tag else tag
@@ -108,8 +121,10 @@ def find_m1dx_related_files(m1dx_path: Path) -> List[Path]:
   except Exception as e:
     print(f"Error parsing {m1dx_path}: {e}")
 
-  # Add sidecar files (e.g. .sqlite, .mupp) with same stem
-  for ext in [".sqlite", ".mupp"]:
+  # Add sidecar files with same stem
+  # - .sqlite, .mupp: editable setup files
+  # - .cs:            plugins
+  for ext in [".sqlite", ".mupp", ".cs"]:
     sidecar = m1dx_path.with_suffix(ext)
     if sidecar.exists():
       related.append(sidecar)
@@ -122,11 +137,11 @@ def find_shp_related_files(shp_path: Path) -> List[Path]:
   return [base.with_suffix(ext) for ext in extensions if base.with_suffix(ext).exists()]
 
 
-def collect_files(pfs_path: Path, mode: str, collected: Set[Path]) -> None:
+def collect_files(pfs_path: Path, include_all: bool, collected: Set[Path]) -> None:
   global tab_file
   pfs_obj = mikeio.pfs.read_pfs(pfs_path)
   collected.add(pfs_path)
-  for ref, breadcrumb in extract_file_references(pfs_obj, only_if_used=True):
+  for ref, breadcrumb in extract_file_references(pfs_obj, include_all):    
     abs_ref = (pfs_path.parent / ref)
     if not abs_ref.exists():
       print(tab_file * "  " + f"Missing file: {abs_ref} ({'/'.join(breadcrumb)})")
@@ -141,6 +156,9 @@ def collect_files(pfs_path: Path, mode: str, collected: Set[Path]) -> None:
     elif abs_ref.suffix.lower() == ".shp":
       for shp_related in find_shp_related_files(abs_ref):
         collected.add(shp_related)
+    elif abs_ref.suffix.lower() == ".hot":
+      collected.add(abs_ref)
+      collected.add(Path(os.path.splitext(abs_ref)[0] + ".frf")) # special case - whenever mshe needs a .hot file it also needs the .frf file, not listed in .sheres!
     elif abs_ref.suffix.lower() == ".dll":
       # Only case so far: The python installation dll referenced in the .she file. No good to include that!
       continue
@@ -149,36 +167,15 @@ def collect_files(pfs_path: Path, mode: str, collected: Set[Path]) -> None:
         collected.add(abs_ref)
         print(tab_file * "  " + f"Sub-PFS-File: {abs_ref}")
       tab_file += 2
-      collect_files(abs_ref, mode, collected)
+      collect_files(abs_ref, include_all, collected)
       tab_file -= 2
     else:
       collected.add(abs_ref)
   # print(collected)
 
 
-def create_zip(master_pfs: Path, mode: str, out_path: str, force):
-  master_pfs = master_pfs
-
-  if not is_pfs_file(master_pfs):
-    raise ValueError(f'The file provided does not seem to be a valid pfs file:\n\t"{master_pfs}"')
-
-  # Collect all referenced files including the main file
-  all_paths = {master_pfs}
-  collect_files(master_pfs, mode, all_paths)
-
-  # Compute common root across all files
-  real_root = Path(os.path.commonpath([str(p) for p in all_paths]))
-  
-  # creating zip file
-  if out_path is None:
-    zip_file = master_pfs.parent / (master_pfs.stem + ".zip")
-  
-  if os.path.isfile(zip_file) and not force:
-    answer = input(f"{zip_file} exists - overwrite? (y/n): ").strip().lower()
-    if answer not in ["y", "yes"]:
-      print("Skip writing output file")
-      return
-  with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+def main(master_pfs: Path, include_all: bool, to_zip: bool, out_path: str, force: bool):
+  def pack():
     for file in all_paths:
       try:
         relative_path = file.relative_to(real_root)
@@ -187,18 +184,60 @@ def create_zip(master_pfs: Path, mode: str, out_path: str, force):
       except ValueError:
         continue  # skip if file is outside tree
       if file.is_file():
-        # shutil.copy2(file, dest)
-        zipf.write(file, relative_path)
-  print(f"Zip file created: {zip_file}")
+        if to_zip:
+          zipf.write(file, relative_path)
+        else:
+          dest = out_path / relative_path
+          dest.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(file, dest)
+    if to_zip:
+      print(f"Zip file created: {out_path}")
+    else:
+      print(f"Staging directory created: {out_path}")
+
+  master_pfs = Path(master_pfs) # in case a string is passed, otherwise it does an unneccessary copy
+
+  if not is_pfs_file(master_pfs):
+    raise ValueError(f'The file provided does not seem to be a valid pfs file:\n\t"{master_pfs}"')
+
+  # Collect all referenced files including the main file
+  all_paths = {master_pfs}
+  collect_files(master_pfs, include_all, all_paths)
+
+  # Compute common root across all files
+  real_root = Path(os.path.commonpath([str(p) for p in all_paths]))
+
+  if to_zip:
+    # creating zip file
+    if out_path is None:
+      out_path = master_pfs.parent / (master_pfs.stem + ".zip")
+    
+    if os.path.isfile(out_path) and not force:
+      answer = input(f"{out_path} exists - overwrite? (y/n): ").strip().lower()
+      if answer not in ["y", "yes"]:
+        print("Skip writing output file")
+        return
+    with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+      pack()
+  else:
+    if out_path is None:
+      out_path = master_pfs.parent / (master_pfs.stem + "_staging")
+    if os.path.isdir(out_path) and not force:
+      answer = input(f"{out_path} exists - overwrite? (y/n): ").strip().lower()
+      if answer not in ["y", "yes"]:
+        print("Skip writing output directory")
+        return
+    pack()
 
 
 def parse_args():
-  parser = argparse.ArgumentParser(description="Stage a PFS file and its dependencies.") 
+  parser = argparse.ArgumentParser(description="Pack a PFS file and its dependencies.") 
   parser.add_argument("pfs_path", nargs='?', type=str, help="Path to the main PFS file")
-  parser.add_argument("-o", "--output", type=str, help="Path to the output zip file")
-  parser.add_argument("-m", "--minimum", action="store_true", help="Inlcude only currently used files")
-  parser.add_argument("-a", "--all", action="store_true", help="Include all files, even if not currently used")
-  parser.add_argument("-f", "--force", action="store_true", help="Overwrite output if it already exists")
+  parser.add_argument("-o", "--output", type=str, help="Path to the output zip file or directory")
+  parser.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files")
+  parser.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used (default)")
+  parser.add_argument("-f", "--force",   action="store_true", help="Overwrite output if it already exists")
+  parser.add_argument("-d", "--dir",     action="store_true", help="Create a directory as output instead of a zip file")
 
   args = parser.parse_args()
 
@@ -214,7 +253,7 @@ def parse_args():
         raise ValueError("No file selected. Exiting.")
       args.pfs_path = path
     except ModuleNotFoundError:
-      print("tkinter not available. Please enter the full path to the main PFS file:")
+      print("Cannot open file selection dialog (tkinter not available). Please enter the full path to the main PFS file:")
       path = input("Path: ").strip()
       if not path:
         raise ValueError("No path provided. Exiting.")
@@ -237,10 +276,11 @@ def parse_args():
 if __name__ == "__main__":
   import sys
   try:
-    print(sys.argv)
+    # print(sys.argv)
     args = parse_args()
-    mode = "minimum" if args.minimum else "all"
-    create_zip(Path(args.pfs_path), mode, args.output, args.force)
+    include_all = not args.minimum
+    to_zip = not args.dir
+    main(Path(args.pfs_path), include_all, to_zip, args.output, args.force)
   except Exception as e:
     traceback.print_exc()
   input("\nPress Enter to exit...")
