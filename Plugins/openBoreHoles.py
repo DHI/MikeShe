@@ -1,9 +1,29 @@
 ########## MIKE SHE plugin for open bore holes ##########
 # Subject:      Simulate open bore holes, calculate exchange flows between SZ layers and the bore hole and the resulting head in the bore hole
-# Usage:        Attach to an MIKE SHE model as a plugin, adapt the few hard coded global variables (after imports)
+# Usage:        Create a config file, attach to a MIKE SHE model as a plugin, adapt the few hard coded global variables (after imports)
 # Dependencies: mikeio (which requires: numpy, scipy - these are also used here)
 # author:       uha@dhigroup.com
 # date:         10/2022
+#
+#########################################################
+#
+# Configuration file
+# The configuration file is a csv file using ';' as a separator. The first line contains
+# headers, subsequent lines either data or comments denoted by '#'. The columns are:
+#   name: An arbitrary name for the bore hole (must not contain ';')
+#   x:    x-coordinate of bore hole (model coordinate system)
+#   y:    y-coordinate of bore hole (model coordinate system)
+#   d:    bore hole diameter (m)
+#   bot:  Elevation of bore hole bottom (m)
+#   top:  Elevation of bore hole top (m) (really the top of the filter for bore holes that have a coated top end)
+# Decimal separator is '.'. Extra white space may be present anywhere and will be ignored.
+# 
+# Example:
+# +----------------------------------------------------+
+# |               name;    x;    y;    d;   bot;   top |
+# | # Bore hole right in the center:                   |
+# |   Center bore hole; 24.2; 26.1; 0.15; -80.3;  10.7 |
+# +----------------------------------------------------+
 #
 #########################################################
 #
@@ -89,6 +109,10 @@
 # Memory:
 #   Currently all data for the bore hole dfs0 file is collected over the entire simulation to be written at the very end.
 #   This may or may not become a problem with many bore holes, short SZ time steps and long simulations.
+# 
+# Time varying SZ conductivities:
+#   Currently the assumption is that SZ conductivities are constant throughout the simulation. If the conductivities 
+#   are time varying instead the bore hole leakages will not be updated accordingly after initialization.
 #
 #### Limitations closed solution:
 # Exchange area:
