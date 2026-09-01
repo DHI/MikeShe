@@ -2,6 +2,7 @@
 # Subject:      Simulate open bore holes, calculate exchange flows between SZ layers and the bore hole and the resulting head in the bore hole
 # Usage:        Create a config file, attach to a MIKE SHE model as a plugin, adapt the few hard coded global variables (after imports)
 # Dependencies: mikeio (which requires: numpy, scipy - these are also used here)
+#               Last tested with mikeio 3.0.1 on python 3.14.
 # author:       uha@dhigroup.com
 # date:         10/2022
 #
@@ -397,14 +398,14 @@ def preTimeStep():
 def preLeaveSimulator():
   preTimeStep() # capture end of last time step
   title = "Open bore hole heads"
-  items = [mikeio.ItemInfo(f"Head \"{bh.name}\"", itemtype=mikeio.EUMType.Water_Level) for bh in bhs]
   fname = os.path.join(setup_dir, f"{setup_name}.she - Result Files/{setup_name}_BoreHoleHeads.dfs0")
 
-  ds = mikeio.Dataset(
-    data = [bh.heads for bh in bhs],
-    time = times,
-    items = items
-  )
+  items = [mikeio.DataArray(
+             np.array(bh.heads),
+             time=times,
+             item=mikeio.ItemInfo(f"Head \"{bh.name}\"", itemtype=mikeio.EUMType.Water_Level)
+           ) for bh in bhs]
+  ds = mikeio.Dataset(items)
   ds.to_dfs(fname, title=title)
 
   ms.wm.print("\r\nBore Hole Convergence Report\r\n============================")
