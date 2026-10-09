@@ -11,7 +11,9 @@
 #             Don't know what happens when you reference files on a different drive - try and report!
 #           - .dll files will not be included
 # Requires: mikeio, optionally tkinter (for file selection dialog)
-# Usage:    A: Run from console with or without arguments. For non-interactive mode specify all required arguments.
+# Usage:    A: Run from console with or without arguments. For non-interactive mode specify all required arguments
+#              (pfs file, -m or -a, and -f unless the output does not exist yet).
+#              Exit code: 0 on success, 1 on failure, 2 on a command line error.
 #           B: Double click, navigate to pfs file... Requires that .py files are associated with a python interpreter on your system. tkinter installed with python gives you GUI file selection.
 #           C: Register as shell command, then right click any pfs file in Windows Explorer and select the command (Windows only)
 #              How? Save the following lines as a text file with .reg extension. Set the paths to your python installation and to where you placed this script. Then execute as administrator.
@@ -52,8 +54,8 @@ def is_pfs_file(path: Path) -> bool:
     return True
   except Exception as e:
     # Some extensions are known to be pfs files, it is an error if those cannot be parsed!
-    if os.path.splitext(path)[1].lower() in [".etv", ".uzs", ".wel", ".wbl", ".sheres", ".mhydro", ".ecolab"]:
-      raise
+    if os.path.splitext(path)[1].lower() in [".she", ".etv", ".uzs", ".wel", ".wbl", ".sheres", ".mhydro", ".ecolab"]:
+      raise ValueError(f'Cannot parse pfs file "{path}": {e}') from e
     return False
 
 
@@ -111,7 +113,7 @@ def find_m1dx_related_files(m1dx_path: Path) -> List[Path]:
     if strip_ns(elem.tag) == "Path" and elem.text:
       text = elem.text.strip()
       if text and not text.lower().endswith('.html'):
-        path = (m1dx_path.parent / Path(text))
+        path = Path(os.path.normpath(m1dx_path.parent / text))
         related.append(path)
     for child in elem:
       walk(child)
@@ -132,9 +134,9 @@ def find_m1dx_related_files(m1dx_path: Path) -> List[Path]:
 
 
 def find_shp_related_files(shp_path: Path) -> List[Path]:
-  base = shp_path.with_suffix('')
+  base = os.path.splitext(shp_path)[0] # keeps a dotted stem such as "riv.v2" intact
   extensions = ['.shp', '.shx', '.dbf', '.prj', '.cpg', '.qpj']
-  return [base.with_suffix(ext) for ext in extensions if base.with_suffix(ext).exists()]
+  return [Path(base + ext) for ext in extensions if os.path.isfile(base + ext)]
 
 
 def collect_files(pfs_path: Path, include_all: bool, collected: Set[Path]) -> None:
@@ -142,7 +144,8 @@ def collect_files(pfs_path: Path, include_all: bool, collected: Set[Path]) -> No
   pfs_obj = mikeio.pfs.read_pfs(pfs_path)
   collected.add(pfs_path)
   for ref, breadcrumb in extract_file_references(pfs_obj, include_all):    
-    abs_ref = (pfs_path.parent / ref)
+    # normpath removes "..", so the same file referenced from different directories is one set member
+    abs_ref = Path(os.path.normpath(pfs_path.parent / ref))
     if not abs_ref.exists():
       print(tab_file * "  " + f"Missing file: {abs_ref} ({'/'.join(breadcrumb)})")
       continue
@@ -158,45 +161,56 @@ def collect_files(pfs_path: Path, include_all: bool, collected: Set[Path]) -> No
         collected.add(shp_related)
     elif abs_ref.suffix.lower() == ".hot":
       collected.add(abs_ref)
-      collected.add(Path(os.path.splitext(abs_ref)[0] + ".frf")) # special case - whenever mshe needs a .hot file it also needs the .frf file, not listed in .sheres!
+      frf = Path(os.path.splitext(abs_ref)[0] + ".frf") # special case - whenever mshe needs a .hot file it also needs the .frf file, not listed in .sheres!
+      if frf.is_file():
+        collected.add(frf)
+      else:
+        print(tab_file * "  " + f"Missing file: {frf} (needed together with {abs_ref.name})")
     elif abs_ref.suffix.lower() == ".dll":
       # Only case so far: The python installation dll referenced in the .she file. No good to include that!
       continue
     elif abs_ref.suffix.lower() not in ['.dfs0', '.dfs2', '.dfs3'] and is_pfs_file(abs_ref):
-      if not abs_ref in collected:
+      if not abs_ref in collected: # a pfs file that is referenced twice, or refers back to its parent, is walked once
         collected.add(abs_ref)
         print(tab_file * "  " + f"Sub-PFS-File: {abs_ref}")
-      tab_file += 2
-      collect_files(abs_ref, include_all, collected)
-      tab_file -= 2
+        tab_file += 2
+        collect_files(abs_ref, include_all, collected)
+        tab_file -= 2
     else:
       collected.add(abs_ref)
   # print(collected)
 
 
-def main(master_pfs: Path, include_all: bool, to_zip: bool, out_path: str, force: bool):
+def main(master_pfs: Path, include_all: bool, to_zip: bool, out_path: str, force: bool) -> bool:
+  """Returns True when the package was written, False when the user declined to overwrite the output."""
   def pack():
     for file in all_paths:
       try:
         relative_path = file.relative_to(real_root)
         if relative_path == Path("."):
-          relative_path = file.name
+          relative_path = Path(file.name)
       except ValueError:
-        continue  # skip if file is outside tree
-      if file.is_file():
-        if to_zip:
-          zipf.write(file, relative_path)
-        else:
-          dest = out_path / relative_path
-          dest.parent.mkdir(parents=True, exist_ok=True)
-          shutil.copy2(file, dest)
+        print(f"Skipped, outside the common root {real_root}: {file}")
+        continue
+      if not file.is_file():
+        print(f"Skipped, not a file: {file}")
+        continue
+      if to_zip:
+        zipf.write(file, relative_path)
+      else:
+        dest = out_path / relative_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file, dest)
     if to_zip:
       print(f"Zip file created: {out_path}")
     else:
       print(f"Staging directory created: {out_path}")
 
-  master_pfs = Path(master_pfs) # in case a string is passed, otherwise it does an unneccessary copy
+  # Same form as the collected references (absolute, no ".."), so that set membership and the common root work
+  master_pfs = Path(os.path.normpath(Path(master_pfs).absolute()))
 
+  if not master_pfs.is_file():
+    raise FileNotFoundError(f'File not found:\n\t"{master_pfs}"')
   if not is_pfs_file(master_pfs):
     raise ValueError(f'The file provided does not seem to be a valid pfs file:\n\t"{master_pfs}"')
 
@@ -211,59 +225,76 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, out_path: str, force
     # creating zip file
     if out_path is None:
       out_path = master_pfs.parent / (master_pfs.stem + ".zip")
-    
-    if os.path.isfile(out_path) and not force:
+    out_path = Path(out_path)
+    if out_path.is_dir():
+      raise ValueError(f'The output path is a directory. Use -d to create a staging directory:\n\t"{out_path}"')
+    if out_path.exists() and not force:
       answer = input(f"{out_path} exists - overwrite? (y/n): ").strip().lower()
       if answer not in ["y", "yes"]:
         print("Skip writing output file")
-        return
+        return False
     with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
       pack()
   else:
     if out_path is None:
       out_path = master_pfs.parent / (master_pfs.stem + "_staging")
-    if os.path.isdir(out_path) and not force:
-      answer = input(f"{out_path} exists - overwrite? (y/n): ").strip().lower()
-      if answer not in ["y", "yes"]:
-        print("Skip writing output directory")
-        return
+    out_path = Path(out_path)
+    if out_path.is_file():
+      raise ValueError(f'The output path is a file. Omit -d to create a zip file:\n\t"{out_path}"')
+    if out_path.exists():
+      if not force:
+        answer = input(f"{out_path} exists - overwrite? (y/n): ").strip().lower()
+        if answer not in ["y", "yes"]:
+          print("Skip writing output directory")
+          return False
+      print(f"Writing into the existing directory, files that do not belong to this model are kept: {out_path}")
     pack()
+  return True
 
 
 def parse_args():
   parser = argparse.ArgumentParser(description="Pack a PFS file and its dependencies.") 
   parser.add_argument("pfs_path", nargs='?', type=str, help="Path to the main PFS file")
   parser.add_argument("-o", "--output", type=str, help="Path to the output zip file or directory")
-  parser.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files")
-  parser.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used (default)")
+  mode = parser.add_mutually_exclusive_group()
+  mode.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files")
+  mode.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used (default)")
   parser.add_argument("-f", "--force",   action="store_true", help="Overwrite output if it already exists")
   parser.add_argument("-d", "--dir",     action="store_true", help="Create a directory as output instead of a zip file")
 
   args = parser.parse_args()
+
+  # Interactive use (double click, Explorer command, console without arguments) prompts for what is missing
+  # and pauses at the end, so that the console window stays open. A complete command line prompts only before
+  # overwriting an existing output without -f.
+  args.interactive = not args.pfs_path or not (args.minimum or args.all)
 
   # Prompt for path if not provided
   if not args.pfs_path:
     try:
       import tkinter as tk
       from tkinter import filedialog
-      root = tk.Tk()
-      root.withdraw()
-      path = filedialog.askopenfilename(title="Select main PFS file")
-      if not path:
-        raise ValueError("No file selected. Exiting.")
-      args.pfs_path = path
-    except ModuleNotFoundError:
-      print("Cannot open file selection dialog (tkinter not available). Please enter the full path to the main PFS file:")
+      dialog = tk.Tk()
+      dialog.withdraw()
+    except Exception as e: # tkinter not installed, or no display
+      print(f"Cannot open file selection dialog ({e}). Please enter the full path to the main PFS file:")
       path = input("Path: ").strip()
       if not path:
-        raise ValueError("No path provided. Exiting.")
-      args.pfs_path = path
+        print("No path provided. Exiting.")
+        sys.exit(1)
+    else:
+      path = filedialog.askopenfilename(title="Select main PFS file")
+      dialog.destroy()
+      if not path:
+        print("No file selected. Exiting.")
+        sys.exit(1)
+    args.pfs_path = path
 
   # Ask for mode if neither flag was set
   if not args.minimum and not args.all:
     while True:
-      answer = input("Include all files, even if not currently used? (y/n): ").strip().lower()
-      if answer in ["y", "yes"]:
+      answer = input("Include all files, even if not currently used? (Y/n): ").strip().lower()
+      if answer in ["", "y", "yes"]:
         args.all = True
         break
       elif answer in ["n", "no"]:
@@ -274,13 +305,20 @@ def parse_args():
 
 
 if __name__ == "__main__":
-  import sys
+  interactive = True
+  exit_code = 1
   try:
-    # print(sys.argv)
     args = parse_args()
+    interactive = args.interactive
     include_all = not args.minimum
     to_zip = not args.dir
-    main(Path(args.pfs_path), include_all, to_zip, args.output, args.force)
+    if main(Path(args.pfs_path), include_all, to_zip, args.output, args.force):
+      exit_code = 0
   except Exception as e:
     traceback.print_exc()
-  input("\nPress Enter to exit...")
+  if interactive:
+    try:
+      input("\nPress Enter to exit...")
+    except EOFError:
+      pass
+  sys.exit(exit_code)
