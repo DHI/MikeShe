@@ -41,8 +41,8 @@ python run_all_examples.py          # runAll: single, serial variants, parallel,
 python execute_stepwise_examples.py # initialize + performTimeStep + runToTime, with an inline plugin
 
 # Pack a .she setup and everything it references
-python DataProcessing/pfs_pack.py <setup.she> [-o OUT] [-a|-m] [-d] [-f]
-# no args -> interactive (tkinter dialog); -d writes a staging dir instead of a zip
+python DataProcessing/pfs_pack.py <setup.she> [-o OUT] [-a|-m] [-d|-p] [-f]
+# no args -> interactive (tkinter dialog); -d writes a staging dir instead of a zip, -p places the .she in OUT
 ```
 
 There is no lint config and no automated tests. Verification means running an actual MIKE SHE model:
