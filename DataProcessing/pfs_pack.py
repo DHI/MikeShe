@@ -7,12 +7,18 @@
 #           - Referenced .shp files will bring their buddies along
 #           - Missing files will be reported, but not treated as errors
 #           - References to files outside the directory of the main pfs files are not recommended but are handled
-#             by placing the main pfs file in a sub[-sub[-sub[-sub]]] directory of the staging directory.
-#             Don't know what happens when you reference files on a different drive - try and report!
+#             by placing the main pfs file in a sub[-sub[-sub[-sub]]] directory of the zip file or staging
+#             directory (-d). With -p the main pfs file lands directly in the output directory instead, and such
+#             references land above it.
+#             Files on a different drive than the main pfs file are reported and left out.
 #           - .dll files will not be included
+#           - A staging directory is filled like robocopy does it: a file that is already there with the same size
+#             and time is skipped, a differing file is updated from the source after confirmation (or with -f), other
+#             files in the directory are kept, and a re-run of the same command continues an interrupted copy.
+#             On Windows robocopy does the copying (retries and resumes after a network error).
 # Requires: mikeio, optionally tkinter (for file selection dialog)
 # Usage:    A: Run from console with or without arguments. For non-interactive mode specify all required arguments
-#              (pfs file, -m or -a, and -f unless the output does not exist yet).
+#              (pfs file, -m or -a, -o with -p, and -f if the target already exists).
 #              Exit code: 0 on success, 1 on failure, 2 on a command line error.
 #           B: Double click, navigate to pfs file... Requires that .py files are associated with a python interpreter on your system. tkinter installed with python gives you GUI file selection.
 #           C: Register as shell command, then right click any pfs file in Windows Explorer and select the command (Windows only)
@@ -29,13 +35,15 @@
 # Author: DHI\uha
 # Date:   05/2025
 
+from datetime import datetime
 from pathlib import Path
-from typing import Set, List
+from typing import Set, List, Tuple
 import argparse
 import mikeio.pfs
 import os
 import re
 import shutil
+import subprocess
 import sys
 import traceback
 import xml.etree.ElementTree as ET
@@ -203,24 +211,67 @@ def collect_files(pfs_path: Path, pfs_obj, include_all: bool, collected: Set[Pat
   # print(collected)
 
 
-def confirm_overwrite(out_path: Path, force: bool) -> bool:
-  """True if an existing output may be overwritten: -f given, or the user answered yes at the prompt."""
+def confirm_overwrite(question: str, force: bool) -> bool:
+  """True if existing output may be overwritten: -f given, or the user answered yes at the prompt."""
   if force:
     return True
   try:
-    answer = input(f"{out_path} exists - overwrite? (y/n): ").strip().lower()
-  except (EOFError, OSError): # no usable stdin (CI, scheduled task, "< NUL"): refuse with the cause instead of a traceback
-    print(f"\n{out_path} exists and no input is available to confirm overwriting it. Use -f to overwrite.")
-    return False
+    answer = input(f"{question} (y/n): ").strip().lower()
+  except (EOFError, OSError): # no usable stdin (CI, scheduled task, "< NUL"): stop with the cause instead of a traceback
+    raise UserAbort("\nNo stdin available to answer the question, run again with -f to force update.")
   return answer in ["y", "yes"]
 
 
-def main(master_pfs: Path, include_all: bool, to_zip: bool, out_path: str, force: bool) -> bool:
-  """Returns True when the package was written, False when the user declined to overwrite the output."""
-  def pack():
-    for file in all_paths:
+def describe(path: Path) -> str:
+  """Size and modification time of a file, for the overview of what a copy would replace."""
+  stat = path.stat()
+  return f"{stat.st_size:,} bytes, {datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M:%S}"
+
+
+def is_identical(src: Path, dest: Path) -> bool:
+  """Same size and modification time, which both copy routines preserve: the file has been copied completely.
+  A partial file from an interrupted copy never matches, its time is the time of the interruption. The two
+  second tolerance is the FAT time stamp resolution, the same tolerance robocopy applies with /FFT."""
+  src_stat, dest_stat = src.stat(), dest.stat()
+  return src_stat.st_size == dest_stat.st_size and abs(src_stat.st_mtime - dest_stat.st_mtime) < 2
+
+
+def copy_files(jobs: List[Tuple[Path, Path]]) -> bool:
+  """Copies every (source, destination) pair with its time stamps. True on success. On Windows robocopy does it,
+  one call per (source directory, destination directory) pair with the file names as arguments: /Z resumes a copy
+  that robocopy itself interrupted, /R and /W ride out a transient network error, and exit codes below 8 mean
+  success (1: files copied). Elsewhere a plain copy, which a re-run of the script continues file by file."""
+  if os.name == "nt" and shutil.which("robocopy"):
+    groups = {}
+    for src, dest in jobs:
+      groups.setdefault((src.parent, dest.parent), []).append(src.name)
+    for (src_dir, dest_dir), names in groups.items():
+      command = ["robocopy", str(src_dir), str(dest_dir), *names, "/Z", "/R:20", "/W:30", "/NJH", "/NJS", "/NDL"]
+      sys.stdout.flush() # keeps the plan before robocopy's lines when stdout is a pipe
+      exit_code = subprocess.run(command).returncode
+      if exit_code >= 8:
+        print(f"\nrobocopy failed with exit code {exit_code} while copying into {dest_dir}")
+        print("Re-run the same command to continue where it stopped (-f skips the confirmation).")
+        return False
+    return True
+  for src, dest in jobs:
+    print(f"{src} ({describe(src)})")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+  return True
+
+
+def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_path: str, force: bool) -> bool:
+  """Returns True when the package is complete, False when the user declined to overwrite the zip file or the
+  copy failed."""
+  def pack() -> bool:
+    new = []       # staging directory: (source, destination) of the files that are not there yet
+    differing = [] # (source, destination) of the files that are there but differ; updating them needs -f or a yes
+    n_complete = 0
+    n_kept = 0
+    for file in sorted(all_paths):
       try:
-        relative_path = file.relative_to(real_root)
+        relative_path = Path(os.path.relpath(file, real_root)) if place else file.relative_to(real_root)
         if relative_path == Path("."):
           relative_path = Path(file.name)
       except ValueError:
@@ -232,13 +283,40 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, out_path: str, force
       if to_zip:
         zipf.write(file, relative_path)
       else:
-        dest = out_path / relative_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file, dest)
+        dest = canonical(out_path / relative_path)
+        if relative_path.parts[0] == "..":
+          print(f"Lands above the output directory: {dest}")
+        if not dest.exists():
+          new.append((file, dest))
+        elif is_identical(file, dest):
+          n_complete += 1
+        else:
+          differing.append((file, dest))
     if to_zip:
       print(f"Zip file created: {out_path}")
+      return True
+
+    # The plan, then the copy. Nothing is deleted, ever.
+    print(f"  {n_complete} file(s) complete, skipped")
+    print(f"  {len(new)} file(s) new, will be copied")
+    jobs = new
+    if differing:
+      print(f"  {len(differing)} file(s) differ, will be updated:")
+      for file, dest in differing:
+        print(f"    {dest}")
+        print(f"      here:   {describe(dest)}")
+        print(f"      source: {describe(file)}")
+      if confirm_overwrite("Update the differing file(s)?", force):
+        jobs = new + differing
+      else:
+        n_kept = len(differing)
+    if jobs and not copy_files(jobs):
+      return False
+    if n_kept:
+      print(f"Staging directory written, {n_kept} file(s) kept as they are: {out_path}")
     else:
-      print(f"Staging directory created: {out_path}")
+      print(f"Staging directory complete: {out_path}")
+    return True
 
   master_pfs = canonical(master_pfs)
 
@@ -252,11 +330,15 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, out_path: str, force
   all_paths = {master_pfs}
   collect_files(master_pfs, master_obj, include_all, all_paths, walked=set())
 
-  # Compute common root across all files on the master's drive. os.path.commonpath raises for paths on
-  # different drives (or UNC shares); files there have no place in a relative tree and are reported by pack().
-  master_drive = os.path.splitdrive(master_pfs)[0].lower()
-  paths_on_master_drive = [str(p) for p in all_paths if os.path.splitdrive(p)[0].lower() == master_drive]
-  real_root = Path(os.path.commonpath(paths_on_master_drive))
+  if place:
+    # The master lands directly in the output directory, every other file keeps its position relative to it
+    real_root = master_pfs.parent
+  else:
+    # Compute common root across all files on the master's drive. os.path.commonpath raises for paths on
+    # different drives (or UNC shares); files there have no place in a relative tree and are reported by pack().
+    master_drive = os.path.splitdrive(master_pfs)[0].lower()
+    paths_on_master_drive = [str(p) for p in all_paths if os.path.splitdrive(p)[0].lower() == master_drive]
+    real_root = Path(os.path.commonpath(paths_on_master_drive))
 
   if to_zip:
     # creating zip file
@@ -265,24 +347,23 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, out_path: str, force
     out_path = Path(out_path)
     if out_path.is_dir():
       raise ValueError(f'The output path is a directory. Use -d to create a staging directory:\n\t"{out_path}"')
-    if out_path.exists() and not confirm_overwrite(out_path, force):
+    if not out_path.suffix:
+      out_path = out_path.with_suffix(".zip")
+    if out_path.exists() and not confirm_overwrite(f"{out_path} exists - overwrite?", force):
       print("Skip writing output file")
       return False
     with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-      pack()
+      return pack()
   else:
     if out_path is None:
       out_path = master_pfs.parent / (master_pfs.stem + "_staging")
     out_path = Path(out_path)
     if out_path.is_file():
-      raise ValueError(f'The output path is a file. Omit -d to create a zip file:\n\t"{out_path}"')
+      raise ValueError(f'The output path is a file. Omit -d/-p to create a zip file:\n\t"{out_path}"')
     if out_path.exists():
-      if not confirm_overwrite(out_path, force):
-        print("Skip writing output directory")
-        return False
-      print(f"Writing into the existing directory, files that do not belong to this model are kept: {out_path}")
-    pack()
-  return True
+      print(f"Writing into the existing directory: {out_path}")
+      print("Files are compared by size and modification time, like robocopy does. Nothing in the directory is deleted.")
+    return pack()
 
 
 def parse_args():
@@ -292,10 +373,15 @@ def parse_args():
   mode = parser.add_mutually_exclusive_group()
   mode.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files")
   mode.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used (default)")
-  parser.add_argument("-f", "--force",   action="store_true", help="Overwrite output if it already exists")
-  parser.add_argument("-d", "--dir",     action="store_true", help="Create a directory as output instead of a zip file")
+  parser.add_argument("-f", "--force",   action="store_true", help="Replace an existing zip file, or update differing files in the output directory, without asking")
+  layout = parser.add_mutually_exclusive_group()
+  layout.add_argument("-d", "--dir",   action="store_true", help="Create a directory as output instead of a zip file, with the same layout as the zip file")
+  layout.add_argument("-p", "--place", action="store_true", help="Like -d, but the main pfs file lands directly in the output directory (-o required); "
+                                                                 "referenced files keep their position relative to it, ..\\ references land above the directory")
 
   args = parser.parse_args()
+  if args.place and not args.output:
+    parser.error("-p/--place requires -o/--output")
 
   # Interactive use (double click, Explorer command, console without arguments) prompts for what is missing
   # and pauses at the end, so that the console window stays open. A complete command line prompts only before
@@ -342,8 +428,8 @@ if __name__ == "__main__":
     args = parse_args()
     interactive = args.interactive
     include_all = not args.minimum
-    to_zip = not args.dir
-    if main(Path(args.pfs_path), include_all, to_zip, args.output, args.force):
+    to_zip = not (args.dir or args.place)
+    if main(Path(args.pfs_path), include_all, to_zip, args.place, args.output, args.force):
       exit_code = 0
   except UserAbort as e: # the user's own decision, not an error: no traceback, but the pause below still applies
     print(f"{e} Exiting.")
