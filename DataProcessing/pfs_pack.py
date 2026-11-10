@@ -10,7 +10,7 @@
 #             by placing the main pfs file in a sub[-sub[-sub[-sub]]] directory of the zip file or staging
 #             directory (-d). With -p the main pfs file lands directly in the output directory instead, and such
 #             references land above it.
-#             Files on a different drive than the main pfs file are reported and left out.
+#             Files on a different drive than the main pfs file are not supported and raise an error.
 #           - .dll files will not be included
 #           - A staging directory is filled like robocopy does it: a file that is already there with the same size
 #             and time is skipped, a differing file is updated from the source after confirmation (or with -f), other
@@ -330,15 +330,20 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
   all_paths = {master_pfs}
   collect_files(master_pfs, master_obj, include_all, all_paths, walked=set())
 
+  # Files on a different drive (or UNC share) than the main pfs file have no place in the packed, relative
+  # tree: os.path.commonpath would raise on them anyway, so they are reported together and treated as a
+  # hard error instead of being silently left out of the package.
+  master_drive = os.path.splitdrive(master_pfs)[0].lower()
+  other_drive = sorted(p for p in all_paths if os.path.splitdrive(p)[0].lower() != master_drive)
+  if other_drive:
+    files_list = "\n".join(f'\t"{p}"' for p in other_drive)
+    raise ValueError(f'Referenced file(s) on a different drive than the main pfs file "{master_pfs}":\n{files_list}')
+
   if place:
     # The master lands directly in the output directory, every other file keeps its position relative to it
     real_root = master_pfs.parent
   else:
-    # Compute common root across all files on the master's drive. os.path.commonpath raises for paths on
-    # different drives (or UNC shares); files there have no place in a relative tree and are reported by pack().
-    master_drive = os.path.splitdrive(master_pfs)[0].lower()
-    paths_on_master_drive = [str(p) for p in all_paths if os.path.splitdrive(p)[0].lower() == master_drive]
-    real_root = Path(os.path.commonpath(paths_on_master_drive))
+    real_root = Path(os.path.commonpath([str(p) for p in all_paths]))
 
   if to_zip:
     # creating zip file
@@ -371,8 +376,8 @@ def parse_args():
   parser.add_argument("pfs_path", nargs='?', type=str, help="Path to the main PFS file")
   parser.add_argument("-o", "--output", type=str, help="Path to the output zip file or directory")
   mode = parser.add_mutually_exclusive_group()
-  mode.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files")
-  mode.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used (default)")
+  mode.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files (default)")
+  mode.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used")
   parser.add_argument("-f", "--force",   action="store_true", help="Replace an existing zip file, or update differing files in the output directory, without asking")
   layout = parser.add_mutually_exclusive_group()
   layout.add_argument("-d", "--dir",   action="store_true", help="Create a directory as output instead of a zip file, with the same layout as the zip file")
@@ -401,22 +406,15 @@ def parse_args():
       if not path:
         raise UserAbort("No path provided.")
     else:
-      path = filedialog.askopenfilename(title="Select main PFS file")
+      path = filedialog.askopenfilename(title="Select main PFS file", filetypes=[("MIKE SHE files", "*.she")])
       dialog.destroy()
       if not path:
         raise UserAbort("No file selected.")
     args.pfs_path = path
 
-  # Ask for mode if neither flag was set
+  # Default to minimum if neither flag was set
   if not args.minimum and not args.all:
-    while True:
-      answer = input("Include all files, even if not currently used? (Y/n): ").strip().lower()
-      if answer in ["", "y", "yes"]:
-        args.all = True
-        break
-      elif answer in ["n", "no"]:
-        args.minimum = True
-        break
+    args.minimum = True
 
   return args
 
@@ -433,6 +431,8 @@ if __name__ == "__main__":
       exit_code = 0
   except UserAbort as e: # the user's own decision, not an error: no traceback, but the pause below still applies
     print(f"{e} Exiting.")
+  except (FileNotFoundError, ValueError) as e: # an anticipated, already clearly worded problem: no traceback needed
+    print(f"Error: {e}")
   except Exception as e:
     traceback.print_exc()
   if interactive:
