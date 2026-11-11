@@ -406,7 +406,7 @@ def parse_args():
       if not path:
         raise UserAbort("No path provided.")
     else:
-      path = filedialog.askopenfilename(title="Select main PFS file", filetypes=[("MIKE SHE files", "*.she")])
+      path = filedialog.askopenfilename(title="Select main PFS file", filetypes=[("MIKE SHE files", "*.she"), ("MIKE SHE Water Balance Parameters", "*.wbl")])
       dialog.destroy()
       if not path:
         raise UserAbort("No file selected.")
