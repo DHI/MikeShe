@@ -10,7 +10,7 @@
 #             by placing the main pfs file in a sub[-sub[-sub[-sub]]] directory of the zip file or staging
 #             directory (-d). With -p the main pfs file lands directly in the output directory instead, and such
 #             references land above it.
-#             Files on a different drive than the main pfs file are reported and left out.
+#             Files on a different drive than the main pfs file are not supported and raise an error.
 #           - .dll files will not be included
 #           - A staging directory is filled like robocopy does it: a file that is already there with the same size
 #             and time is skipped, a differing file is updated from the source after confirmation (or with -f), other
@@ -35,6 +35,7 @@
 # Author: DHI\uha
 # Date:   05/2025
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Set, List, Tuple
@@ -76,7 +77,7 @@ def try_read_pfs(path: Path):
     return mikeio.pfs.read_pfs(path)
   except Exception as e:
     # Some extensions are known to be pfs files, it is an error if those cannot be parsed!
-    if os.path.splitext(path)[1].lower() in [".she", ".etv", ".uzs", ".wel", ".wbl", ".sheres", ".mhydro", ".ecolab"]:
+    if os.path.splitext(path)[1].lower() in [".etv", ".uzs", ".wel", ".wbl", ".sheres", ".mhydro", ".ecolab"]:
       raise ValueError(f'Cannot parse pfs file "{path}": {e}') from e
     return None
 
@@ -155,15 +156,21 @@ def find_m1dx_related_files(m1dx_path: Path) -> List[Path]:
 
 
 def find_shp_related_files(shp_path: Path) -> List[Path]:
-  """The referenced .shp (which exists, the caller checked) plus the companions present next to it.
-  The companion extensions follow the case of the referenced extension, so that RIV.SHP finds RIV.DBF on a
-  case-sensitive file system. The stem is kept as is: on such a system A.shp and a.shp are different files."""
-  base, shp_ext = os.path.splitext(str(shp_path)) # splitext keeps a dotted stem such as "riv.v2" intact
-  companion_extensions = ['.shx', '.dbf', '.prj', '.cpg', '.qpj']
-  if shp_ext.isupper():
-    companion_extensions = [ext.upper() for ext in companion_extensions]
+  """The referenced .shp (which exists, the caller checked) plus the companions present next to it. Companions
+  are found by directory listing and matched by extension case-insensitively, so River.DBF is found next to
+  river.shp even on a case-sensitive file system, regardless of which case each file happens to use. The stem
+  is still compared exactly: on such a system A.shp and a.shp are different files."""
+  stem = os.path.splitext(str(shp_path))[0] # splitext keeps a dotted stem such as "riv.v2" intact
+  companion_extensions = {'.shx', '.dbf', '.prj', '.cpg', '.qpj'}
   related = [shp_path]
-  related.extend(Path(base + ext) for ext in companion_extensions if os.path.isfile(base + ext))
+  try:
+    entries = os.listdir(shp_path.parent)
+  except OSError:
+    entries = []
+  for entry in entries:
+    entry_stem, entry_ext = os.path.splitext(str(shp_path.parent / entry))
+    if entry_stem == stem and entry_ext.lower() in companion_extensions:
+      related.append(shp_path.parent / entry)
   return related
 
 
@@ -222,40 +229,46 @@ def confirm_overwrite(question: str, force: bool) -> bool:
   return answer in ["y", "yes"]
 
 
-def describe(path: Path) -> str:
+def describe(stat_result: os.stat_result) -> str:
   """Size and modification time of a file, for the overview of what a copy would replace."""
-  stat = path.stat()
-  return f"{stat.st_size:,} bytes, {datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M:%S}"
+  return f"{stat_result.st_size:,} bytes, {datetime.fromtimestamp(stat_result.st_mtime):%Y-%m-%d %H:%M:%S}"
 
 
-def is_identical(src: Path, dest: Path) -> bool:
+def is_identical(src_stat: os.stat_result, dest_stat: os.stat_result) -> bool:
   """Same size and modification time, which both copy routines preserve: the file has been copied completely.
   A partial file from an interrupted copy never matches, its time is the time of the interruption. The two
   second tolerance is the FAT time stamp resolution, the same tolerance robocopy applies with /FFT."""
-  src_stat, dest_stat = src.stat(), dest.stat()
   return src_stat.st_size == dest_stat.st_size and abs(src_stat.st_mtime - dest_stat.st_mtime) < 2
 
 
 def copy_files(jobs: List[Tuple[Path, Path]]) -> bool:
   """Copies every (source, destination) pair with its time stamps. True on success. On Windows robocopy does it,
-  one call per (source directory, destination directory) pair with the file names as arguments: /Z resumes a copy
-  that robocopy itself interrupted, /R and /W ride out a transient network error, and exit codes below 8 mean
-  success (1: files copied). Elsewhere a plain copy, which a re-run of the script continues file by file."""
+  one call per (source directory, destination directory) pair with the file names as arguments; independent
+  groups run concurrently since they target different directories: /Z resumes a copy that robocopy itself
+  interrupted, /R and /W ride out a transient network error, and exit codes below 8 mean success (1: files
+  copied). Elsewhere a plain copy, which a re-run of the script continues file by file."""
   if os.name == "nt" and shutil.which("robocopy"):
     groups = {}
     for src, dest in jobs:
       groups.setdefault((src.parent, dest.parent), []).append(src.name)
-    for (src_dir, dest_dir), names in groups.items():
+
+    def run_group(item):
+      (src_dir, dest_dir), names = item
       command = ["robocopy", str(src_dir), str(dest_dir), *names, "/Z", "/R:20", "/W:30", "/NJH", "/NJS", "/NDL"]
-      sys.stdout.flush() # keeps the plan before robocopy's lines when stdout is a pipe
-      exit_code = subprocess.run(command).returncode
-      if exit_code >= 8:
-        print(f"\nrobocopy failed with exit code {exit_code} while copying into {dest_dir}")
-        print("Re-run the same command to continue where it stopped (-f skips the confirmation).")
-        return False
-    return True
+      return dest_dir, subprocess.run(command).returncode
+
+    sys.stdout.flush() # keeps the plan before robocopy's lines when stdout is a pipe
+    ok = True
+    with ThreadPoolExecutor(max_workers=min(4, len(groups))) as executor:
+      for dest_dir, exit_code in executor.map(run_group, groups.items()):
+        if exit_code >= 8:
+          print(f"\nrobocopy failed with exit code {exit_code} while copying into {dest_dir}")
+          ok = False
+    if not ok:
+      print("Re-run the same command to continue where it stopped (-f skips the confirmation).")
+    return ok
   for src, dest in jobs:
-    print(f"{src} ({describe(src)})")
+    print(f"{src} ({describe(src.stat())})")
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
   return True
@@ -266,9 +279,8 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
   copy failed."""
   def pack() -> bool:
     new = []       # staging directory: (source, destination) of the files that are not there yet
-    differing = [] # (source, destination) of the files that are there but differ; updating them needs -f or a yes
+    differing = [] # (source, destination, source stat, destination stat) of files there but differing
     n_complete = 0
-    n_kept = 0
     for file in sorted(all_paths):
       try:
         relative_path = Path(os.path.relpath(file, real_root)) if place else file.relative_to(real_root)
@@ -282,16 +294,20 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
         continue
       if to_zip:
         zipf.write(file, relative_path)
+        continue
+      dest = canonical(out_path / relative_path)
+      if relative_path.parts[0] == "..":
+        print(f"Lands above the output directory: {dest}")
+      try:
+        dest_stat = dest.stat() # also serves as the existence check: one round trip instead of two
+      except OSError:
+        new.append((file, dest))
+        continue
+      file_stat = file.stat()
+      if is_identical(file_stat, dest_stat):
+        n_complete += 1
       else:
-        dest = canonical(out_path / relative_path)
-        if relative_path.parts[0] == "..":
-          print(f"Lands above the output directory: {dest}")
-        if not dest.exists():
-          new.append((file, dest))
-        elif is_identical(file, dest):
-          n_complete += 1
-        else:
-          differing.append((file, dest))
+        differing.append((file, dest, file_stat, dest_stat))
     if to_zip:
       print(f"Zip file created: {out_path}")
       return True
@@ -300,16 +316,21 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
     print(f"  {n_complete} file(s) complete, skipped")
     print(f"  {len(new)} file(s) new, will be copied")
     jobs = new
+    n_kept = len(differing)
     if differing:
       print(f"  {len(differing)} file(s) differ, will be updated:")
-      for file, dest in differing:
+      for file, dest, file_stat, dest_stat in differing:
         print(f"    {dest}")
-        print(f"      here:   {describe(dest)}")
-        print(f"      source: {describe(file)}")
-      if confirm_overwrite("Update the differing file(s)?", force):
-        jobs = new + differing
-      else:
-        n_kept = len(differing)
+        print(f"      here:   {describe(dest_stat)}")
+        print(f"      source: {describe(file_stat)}")
+      try:
+        if confirm_overwrite("Update the differing file(s)?", force):
+          jobs = new + [(file, dest) for file, dest, _, _ in differing]
+          n_kept = 0
+      except UserAbort as e:
+        # No usable stdin to answer with: keep the differing files as they are rather than losing the
+        # new, non-conflicting files too by letting the abort propagate out of pack() unhandled.
+        print(f"{e} Keeping the differing file(s) as they are.")
     if jobs and not copy_files(jobs):
       return False
     if n_kept:
@@ -330,15 +351,20 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
   all_paths = {master_pfs}
   collect_files(master_pfs, master_obj, include_all, all_paths, walked=set())
 
+  # Files on a different drive (or UNC share) than the main pfs file have no place in the packed, relative
+  # tree: os.path.commonpath would raise on them anyway, so they are reported together and treated as a
+  # hard error instead of being silently left out of the package.
+  master_drive = os.path.splitdrive(master_pfs)[0].lower()
+  other_drive = sorted(p for p in all_paths if os.path.splitdrive(p)[0].lower() != master_drive)
+  if other_drive:
+    files_list = "\n".join(f'\t"{p}"' for p in other_drive)
+    raise ValueError(f'Referenced file(s) on a different drive than the main pfs file "{master_pfs}":\n{files_list}')
+
   if place:
     # The master lands directly in the output directory, every other file keeps its position relative to it
     real_root = master_pfs.parent
   else:
-    # Compute common root across all files on the master's drive. os.path.commonpath raises for paths on
-    # different drives (or UNC shares); files there have no place in a relative tree and are reported by pack().
-    master_drive = os.path.splitdrive(master_pfs)[0].lower()
-    paths_on_master_drive = [str(p) for p in all_paths if os.path.splitdrive(p)[0].lower() == master_drive]
-    real_root = Path(os.path.commonpath(paths_on_master_drive))
+    real_root = Path(os.path.commonpath([str(p) for p in all_paths]))
 
   if to_zip:
     # creating zip file
@@ -371,8 +397,8 @@ def parse_args():
   parser.add_argument("pfs_path", nargs='?', type=str, help="Path to the main PFS file")
   parser.add_argument("-o", "--output", type=str, help="Path to the output zip file or directory")
   mode = parser.add_mutually_exclusive_group()
-  mode.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files")
-  mode.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used (default)")
+  mode.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files (default)")
+  mode.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used")
   parser.add_argument("-f", "--force",   action="store_true", help="Replace an existing zip file, or update differing files in the output directory, without asking")
   layout = parser.add_mutually_exclusive_group()
   layout.add_argument("-d", "--dir",   action="store_true", help="Create a directory as output instead of a zip file, with the same layout as the zip file")
@@ -401,22 +427,22 @@ def parse_args():
       if not path:
         raise UserAbort("No path provided.")
     else:
-      path = filedialog.askopenfilename(title="Select main PFS file")
+      path = filedialog.askopenfilename(title="Select main PFS file", filetypes=[("MIKE SHE files", "*.she"), ("MIKE SHE Water Balance Parameters", "*.wbl")])
       dialog.destroy()
       if not path:
         raise UserAbort("No file selected.")
     args.pfs_path = path
 
-  # Ask for mode if neither flag was set
+  # Prompt for the mode if neither flag was set and we can ask (interactive use); non-interactive callers
+  # (CI, scheduled tasks) that omit both flags get the minimum default silently, as before.
   if not args.minimum and not args.all:
-    while True:
-      answer = input("Include all files, even if not currently used? (Y/n): ").strip().lower()
-      if answer in ["", "y", "yes"]:
-        args.all = True
-        break
-      elif answer in ["n", "no"]:
-        args.minimum = True
-        break
+    if args.interactive:
+      try:
+        answer = input("Include all files, even if not currently used? (y/n): ").strip().lower()
+      except (EOFError, OSError):
+        answer = ""
+      args.all = answer in ["y", "yes"]
+    args.minimum = not args.all
 
   return args
 
@@ -433,6 +459,8 @@ if __name__ == "__main__":
       exit_code = 0
   except UserAbort as e: # the user's own decision, not an error: no traceback, but the pause below still applies
     print(f"{e} Exiting.")
+  except (FileNotFoundError, ValueError) as e: # an anticipated, already clearly worded problem: no traceback needed
+    print(f"Error: {e}")
   except Exception as e:
     traceback.print_exc()
   if interactive:
