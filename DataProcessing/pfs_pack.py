@@ -274,6 +274,55 @@ def copy_files(jobs: List[Tuple[Path, Path]]) -> bool:
   return True
 
 
+def pack_entries(all_paths: Set[Path], real_root: Path, place: bool) -> List[Tuple[Path, Path]]:
+  """(file, path relative to real_root) for every file to pack, in path order. With `place` the relative path
+  may start with "..". A path that is not a file is reported and left out."""
+  entries = []
+  for file in sorted(all_paths):
+    relative_path = Path(os.path.relpath(file, real_root)) if place else file.relative_to(real_root)
+    if relative_path == Path("."):
+      relative_path = Path(file.name)
+    if not file.is_file():
+      print(f"Skipped, not a file: {file}")
+      continue
+    entries.append((file, relative_path))
+  return entries
+
+
+def fill_staging_dir(entries: List[Tuple[Path, Path]], out_path: Path, force: bool, notes: List[str]) -> bool:
+  """Brings the staging directory out_path up to date with the entries of pack_entries(). Differing files that
+  the user wants to keep are added to `notes`. False when the copy failed."""
+  new = []       # (source, destination) of the files that are not there yet
+  differing = [] # (source, destination) of the files that are there but differ; updating them needs -f or a yes
+  n_complete = 0
+  for file, relative_path in entries:
+    dest = canonical(out_path / relative_path)
+    if relative_path.parts[0] == "..":
+      print(f"Lands above the output directory: {dest}")
+    if not dest.exists():
+      new.append((file, dest))
+    elif is_identical(file, dest):
+      n_complete += 1
+    else:
+      differing.append((file, dest))
+
+  # The plan, then the copy. Nothing is deleted, ever.
+  print(f"  {n_complete} file(s) complete, skipped")
+  print(f"  {len(new)} file(s) new, will be copied")
+  jobs = new
+  if differing:
+    print(f"  {len(differing)} file(s) differ, will be updated:")
+    for file, dest in differing:
+      print(f"    {dest}")
+      print(f"      here:   {describe(dest)}")
+      print(f"      source: {describe(file)}")
+    if confirm_overwrite("Update the differing file(s)?", force):
+      jobs = new + differing
+    else:
+      notes.append(f"{len(differing)} file(s) kept as they are")
+  return not jobs or copy_files(jobs)
+
+
 def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_path: str, force: bool, incomplete: bool) -> bool:
   """Returns True when the package was written, False when the user declined to overwrite the zip file or to
   pack without the files on another drive, or the copy failed."""
@@ -289,59 +338,6 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
       return True
     print("Nothing packed")
     return False
-
-  def pack() -> bool:
-    new = []       # staging directory: (source, destination) of the files that are not there yet
-    differing = [] # (source, destination) of the files that are there but differ; updating them needs -f or a yes
-    n_complete = 0
-    notes = []     # what keeps the package from being complete, for the closing line
-    if other_drive:
-      notes.append(f"{len(other_drive)} file(s) on another drive left out")
-    for file in sorted(all_paths):
-      relative_path = Path(os.path.relpath(file, real_root)) if place else file.relative_to(real_root)
-      if relative_path == Path("."):
-        relative_path = Path(file.name)
-      if not file.is_file():
-        print(f"Skipped, not a file: {file}")
-        continue
-      if to_zip:
-        zipf.write(file, relative_path)
-      else:
-        dest = canonical(out_path / relative_path)
-        if relative_path.parts[0] == "..":
-          print(f"Lands above the output directory: {dest}")
-        if not dest.exists():
-          new.append((file, dest))
-        elif is_identical(file, dest):
-          n_complete += 1
-        else:
-          differing.append((file, dest))
-    if to_zip:
-      print(f"Zip file created: {out_path}")
-      for note in notes:
-        print(f"  {note}")
-      return True
-
-    # The plan, then the copy. Nothing is deleted, ever.
-    print(f"  {n_complete} file(s) complete, skipped")
-    print(f"  {len(new)} file(s) new, will be copied")
-    jobs = new
-    if differing:
-      print(f"  {len(differing)} file(s) differ, will be updated:")
-      for file, dest in differing:
-        print(f"    {dest}")
-        print(f"      here:   {describe(dest)}")
-        print(f"      source: {describe(file)}")
-      if confirm_overwrite("Update the differing file(s)?", force):
-        jobs = new + differing
-      else:
-        notes.append(f"{len(differing)} file(s) kept as they are")
-    if jobs and not copy_files(jobs):
-      return False
-    print(f"Staging directory {'written' if notes else 'complete'}: {out_path}")
-    for note in notes:
-      print(f"  {note}")
-    return True
 
   master_pfs = canonical(master_pfs)
 
@@ -373,6 +369,9 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
   else:
     real_root = Path(os.path.commonpath([str(p) for p in all_paths]))
 
+  # What keeps the package from being complete, for the closing lines
+  notes = [f"{len(other_drive)} file(s) on another drive left out"] if other_drive else []
+
   if to_zip:
     # creating zip file
     if out_path is None:
@@ -388,7 +387,9 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
       print("Skip writing output file")
       return False
     with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-      return pack()
+      for file, relative_path in pack_entries(all_paths, real_root, place):
+        zipf.write(file, relative_path)
+    print(f"Zip file created: {out_path}")
   else:
     if out_path is None:
       out_path = master_pfs.parent / (master_pfs.stem + "_staging")
@@ -400,7 +401,13 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
     if out_path.exists():
       print(f"Writing into the existing directory: {out_path}")
       print("Files are compared by size and modification time, like robocopy does. Nothing in the directory is deleted.")
-    return pack()
+    if not fill_staging_dir(pack_entries(all_paths, real_root, place), out_path, force, notes):
+      return False
+    print(f"Staging directory written: {out_path}")
+
+  for note in notes:
+    print(f"  {note}")
+  return True
 
 
 def parse_args():
