@@ -1,6 +1,8 @@
-# Purpose:  Pack a pfs file and all files it references into a zip archive (default) or a staging directory. This can e. g.
+# Purpose:  Pack a pfs file and the files it references into a zip archive (default) or a staging directory. This can e. g.
 #           be used for sharing a model including all required files but not the entire directory with result files etc.
 #           - Made for .she files, but should work to a certain extent for other pfs files.
+#           - By default only the files in use are packed (-m): references in a section with IsDataUsedInSetup = 0
+#             are left out. -a packs all referenced files.
 #           - Pfs files referenced in the main pfs file will also be processed.
 #           - Referenced .m1dx files will also be processed to some extent, also any .mupp, .sqlite and .cs files
 #             with the same base name as the .m1dx file will be included.
@@ -10,7 +12,8 @@
 #             by placing the main pfs file in a sub[-sub[-sub[-sub]]] directory of the zip file or staging
 #             directory (-d). With -p the main pfs file lands directly in the output directory instead, and such
 #             references land above it.
-#             Files on a different drive than the main pfs file are reported and left out.
+#             Files on a different drive than the main pfs file cannot be packed: the script lists them and
+#             stops, unless you confirm (or pass -i) to pack without them.
 #           - .dll files will not be included
 #           - A staging directory is filled like robocopy does it: a file that is already there with the same size
 #             and time is skipped, a differing file is updated from the source after confirmation (or with -f), other
@@ -18,9 +21,13 @@
 #             On Windows robocopy does the copying (retries and resumes after a network error).
 # Requires: mikeio, optionally tkinter (for file selection dialog)
 # Usage:    A: Run from console with or without arguments. For non-interactive mode specify all required arguments
-#              (pfs file, -m or -a, -o with -p, and -f if the target already exists).
+#              (pfs file, -m or -a, -o with -p, -f if the target already exists, and -i if files on another
+#              drive may be left out). Without -m or -a the script waits for Enter at the end, so that the
+#              console window of usage B and C stays open: a batch file has to pass one of them.
 #              Exit code: 0 on success, 1 on failure, 2 on a command line error.
-#           B: Double click, navigate to pfs file... Requires that .py files are associated with a python interpreter on your system. tkinter installed with python gives you GUI file selection.
+#           B: Windows Explorer: double click the script, or right click it and choose "Open with" and a python interpreter.
+#              Then navigate to the pfs file. The double click requires that .py files are associated with a python
+#              interpreter on your system. tkinter installed with python gives you GUI file selection.
 #           C: Register as shell command, then right click any pfs file in Windows Explorer and select the command (Windows only)
 #              How? Save the following lines as a text file with .reg extension. Set the paths to your python installation and to where you placed this script. Then execute as administrator.
 #              (or edit the registry manually to add the below keys)
@@ -61,6 +68,11 @@ class UserAbort(Exception):
   """The user gave no input where one was needed (empty prompt, cancelled dialog). Reported without a traceback."""
 
 
+class UserError(Exception):
+  """A problem with the input that the user can fix, with a message written for the user. Reported without a
+  traceback, which stays reserved for defects of the script."""
+
+
 def canonical(path) -> Path:
   """The one form every path takes before it enters the packed set: absolute, no "..", native separators.
   The same file referenced from different directories is then one set member, and the common root is well
@@ -77,7 +89,7 @@ def try_read_pfs(path: Path):
   except Exception as e:
     # Some extensions are known to be pfs files, it is an error if those cannot be parsed!
     if os.path.splitext(path)[1].lower() in [".she", ".etv", ".uzs", ".wel", ".wbl", ".sheres", ".mhydro", ".ecolab"]:
-      raise ValueError(f'Cannot parse pfs file "{path}": {e}') from e
+      raise UserError(f'Cannot parse pfs file "{path}": {e}') from e
     return None
 
 
@@ -211,14 +223,15 @@ def collect_files(pfs_path: Path, pfs_obj, include_all: bool, collected: Set[Pat
   # print(collected)
 
 
-def confirm_overwrite(question: str, force: bool) -> bool:
-  """True if existing output may be overwritten: -f given, or the user answered yes at the prompt."""
+def confirm_overwrite(question: str, force: bool, flag_hint: str = "-f to force update") -> bool:
+  """True if the flag that answers the question with yes was given (`force`), or the user answered yes at the
+  prompt. `flag_hint` names that flag for the case that nobody can answer."""
   if force:
     return True
   try:
     answer = input(f"{question} (y/n): ").strip().lower()
   except (EOFError, OSError): # no usable stdin (CI, scheduled task, "< NUL"): stop with the cause instead of a traceback
-    raise UserAbort("\nNo stdin available to answer the question, run again with -f to force update.")
+    raise UserAbort(f"\nNo stdin available to answer the question, run again with {flag_hint}.")
   return answer in ["y", "yes"]
 
 
@@ -261,22 +274,33 @@ def copy_files(jobs: List[Tuple[Path, Path]]) -> bool:
   return True
 
 
-def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_path: str, force: bool) -> bool:
-  """Returns True when the package is complete, False when the user declined to overwrite the zip file or the
-  copy failed."""
+def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_path: str, force: bool, incomplete: bool) -> bool:
+  """Returns True when the package was written, False when the user declined to overwrite the zip file or to
+  pack without the files on another drive, or the copy failed."""
+  def confirm_incomplete() -> bool:
+    """True if nothing has to be left out, or the user accepts (-i or a yes) a package without the files on
+    another drive."""
+    if not other_drive:
+      return True
+    print("Referenced file(s) on a different drive than the main pfs file cannot be packed:")
+    for file in other_drive:
+      print(f"  {file}")
+    if confirm_overwrite("Pack without these file(s)? The package will be incomplete.", incomplete, "-i to pack without these files"):
+      return True
+    print("Nothing packed")
+    return False
+
   def pack() -> bool:
     new = []       # staging directory: (source, destination) of the files that are not there yet
     differing = [] # (source, destination) of the files that are there but differ; updating them needs -f or a yes
     n_complete = 0
-    n_kept = 0
+    notes = []     # what keeps the package from being complete, for the closing line
+    if other_drive:
+      notes.append(f"{len(other_drive)} file(s) on another drive left out")
     for file in sorted(all_paths):
-      try:
-        relative_path = Path(os.path.relpath(file, real_root)) if place else file.relative_to(real_root)
-        if relative_path == Path("."):
-          relative_path = Path(file.name)
-      except ValueError:
-        print(f"Skipped, outside the common root {real_root}: {file}")
-        continue
+      relative_path = Path(os.path.relpath(file, real_root)) if place else file.relative_to(real_root)
+      if relative_path == Path("."):
+        relative_path = Path(file.name)
       if not file.is_file():
         print(f"Skipped, not a file: {file}")
         continue
@@ -294,6 +318,8 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
           differing.append((file, dest))
     if to_zip:
       print(f"Zip file created: {out_path}")
+      for note in notes:
+        print(f"  {note}")
       return True
 
     # The plan, then the copy. Nothing is deleted, ever.
@@ -309,36 +335,43 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
       if confirm_overwrite("Update the differing file(s)?", force):
         jobs = new + differing
       else:
-        n_kept = len(differing)
+        notes.append(f"{len(differing)} file(s) kept as they are")
     if jobs and not copy_files(jobs):
       return False
-    if n_kept:
-      print(f"Staging directory written, {n_kept} file(s) kept as they are: {out_path}")
-    else:
-      print(f"Staging directory complete: {out_path}")
+    print(f"Staging directory {'written' if notes else 'complete'}: {out_path}")
+    for note in notes:
+      print(f"  {note}")
     return True
 
   master_pfs = canonical(master_pfs)
 
   if not master_pfs.is_file():
-    raise FileNotFoundError(f'File not found:\n\t"{master_pfs}"')
+    raise UserError(f'File not found:\n\t"{master_pfs}"')
   master_obj = try_read_pfs(master_pfs)
   if master_obj is None:
-    raise ValueError(f'The file provided does not seem to be a valid pfs file:\n\t"{master_pfs}"')
+    raise UserError(f'The file provided does not seem to be a valid pfs file:\n\t"{master_pfs}"')
 
   # Collect all referenced files including the main file
+  if not include_all:
+    print("Packing only the files in use. Use -a to include all referenced files.")
   all_paths = {master_pfs}
   collect_files(master_pfs, master_obj, include_all, all_paths, walked=set())
+
+  # A path on a different drive (or UNC share) than the main pfs file has no place in a relative tree. It
+  # leaves the set here; a file among them makes the package incomplete, which confirm_incomplete() asks about
+  # once the output path is known to be valid.
+  master_drive = os.path.splitdrive(master_pfs)[0].lower()
+  off_drive = {p for p in all_paths if os.path.splitdrive(p)[0].lower() != master_drive}
+  all_paths -= off_drive
+  other_drive = sorted(p for p in off_drive if p.is_file())
+  for path in sorted(off_drive.difference(other_drive)):
+    print(f"Skipped, not a file: {path}")
 
   if place:
     # The master lands directly in the output directory, every other file keeps its position relative to it
     real_root = master_pfs.parent
   else:
-    # Compute common root across all files on the master's drive. os.path.commonpath raises for paths on
-    # different drives (or UNC shares); files there have no place in a relative tree and are reported by pack().
-    master_drive = os.path.splitdrive(master_pfs)[0].lower()
-    paths_on_master_drive = [str(p) for p in all_paths if os.path.splitdrive(p)[0].lower() == master_drive]
-    real_root = Path(os.path.commonpath(paths_on_master_drive))
+    real_root = Path(os.path.commonpath([str(p) for p in all_paths]))
 
   if to_zip:
     # creating zip file
@@ -346,9 +379,11 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
       out_path = master_pfs.parent / (master_pfs.stem + ".zip")
     out_path = Path(out_path)
     if out_path.is_dir():
-      raise ValueError(f'The output path is a directory. Use -d to create a staging directory:\n\t"{out_path}"')
+      raise UserError(f'The output path is a directory. Use -d to create a staging directory:\n\t"{out_path}"')
     if not out_path.suffix:
       out_path = out_path.with_suffix(".zip")
+    if not confirm_incomplete():
+      return False
     if out_path.exists() and not confirm_overwrite(f"{out_path} exists - overwrite?", force):
       print("Skip writing output file")
       return False
@@ -359,7 +394,9 @@ def main(master_pfs: Path, include_all: bool, to_zip: bool, place: bool, out_pat
       out_path = master_pfs.parent / (master_pfs.stem + "_staging")
     out_path = Path(out_path)
     if out_path.is_file():
-      raise ValueError(f'The output path is a file. Omit -d/-p to create a zip file:\n\t"{out_path}"')
+      raise UserError(f'The output path is a file. Omit -d/-p to create a zip file:\n\t"{out_path}"')
+    if not confirm_incomplete():
+      return False
     if out_path.exists():
       print(f"Writing into the existing directory: {out_path}")
       print("Files are compared by size and modification time, like robocopy does. Nothing in the directory is deleted.")
@@ -371,9 +408,10 @@ def parse_args():
   parser.add_argument("pfs_path", nargs='?', type=str, help="Path to the main PFS file")
   parser.add_argument("-o", "--output", type=str, help="Path to the output zip file or directory")
   mode = parser.add_mutually_exclusive_group()
-  mode.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files")
-  mode.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used (default)")
+  mode.add_argument("-m", "--minimum", action="store_true", help="Include only currently used files (default)")
+  mode.add_argument("-a", "--all",     action="store_true", help="Include all files, even if not currently used")
   parser.add_argument("-f", "--force",   action="store_true", help="Replace an existing zip file, or update differing files in the output directory, without asking")
+  parser.add_argument("-i", "--incomplete", action="store_true", help="Pack without asking even if referenced files are on a different drive than the main pfs file; they are left out")
   layout = parser.add_mutually_exclusive_group()
   layout.add_argument("-d", "--dir",   action="store_true", help="Create a directory as output instead of a zip file, with the same layout as the zip file")
   layout.add_argument("-p", "--place", action="store_true", help="Like -d, but the main pfs file lands directly in the output directory (-o required); "
@@ -383,9 +421,9 @@ def parse_args():
   if args.place and not args.output:
     parser.error("-p/--place requires -o/--output")
 
-  # Interactive use (double click, Explorer command, console without arguments) prompts for what is missing
-  # and pauses at the end, so that the console window stays open. A complete command line prompts only before
-  # overwriting an existing output without -f.
+  # Interactive use (double click, Explorer command, console without arguments) prompts for a missing path
+  # and pauses at the end, so that the console window stays open. The Explorer command passes the path, so
+  # the absence of -m/-a is what tells it from a complete command line, which does not pause.
   args.interactive = not args.pfs_path or not (args.minimum or args.all)
 
   # Prompt for path if not provided
@@ -401,22 +439,11 @@ def parse_args():
       if not path:
         raise UserAbort("No path provided.")
     else:
-      path = filedialog.askopenfilename(title="Select main PFS file")
+      path = filedialog.askopenfilename(title="Select main PFS file", filetypes=[("MIKE SHE setup files", "*.she"), ("MIKE SHE water balance files", "*.wbl"), ("All files", "*.*")])
       dialog.destroy()
       if not path:
         raise UserAbort("No file selected.")
     args.pfs_path = path
-
-  # Ask for mode if neither flag was set
-  if not args.minimum and not args.all:
-    while True:
-      answer = input("Include all files, even if not currently used? (Y/n): ").strip().lower()
-      if answer in ["", "y", "yes"]:
-        args.all = True
-        break
-      elif answer in ["n", "no"]:
-        args.minimum = True
-        break
 
   return args
 
@@ -427,12 +454,13 @@ if __name__ == "__main__":
   try:
     args = parse_args()
     interactive = args.interactive
-    include_all = not args.minimum
     to_zip = not (args.dir or args.place)
-    if main(Path(args.pfs_path), include_all, to_zip, args.place, args.output, args.force):
+    if main(Path(args.pfs_path), args.all, to_zip, args.place, args.output, args.force, args.incomplete):
       exit_code = 0
   except UserAbort as e: # the user's own decision, not an error: no traceback, but the pause below still applies
     print(f"{e} Exiting.")
+  except UserError as e:
+    print(f"Error: {e}")
   except Exception as e:
     traceback.print_exc()
   if interactive:
