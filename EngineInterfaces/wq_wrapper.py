@@ -1,16 +1,13 @@
 import ctypes
 import numpy as np
-import os
-import sys
 
-# assume we are running mshe_watermovement(d).exe. If we are running from python.exe we are screwed!
-exe_dir = os.path.dirname(sys.executable)
-if "d.exe" in sys.executable:
-  lib = ctypes.CDLL(os.path.join(exe_dir, "MShe_wqd.dll"), winmode=0)
-else:
-  lib = ctypes.CDLL(os.path.join(exe_dir, "MShe_wq.dll"), winmode=0)
+# winmode=0: the classic LoadLibrary search, i.e. the folder of the running executable first (inside a MIKE SHE
+# engine process the library is already loaded from there), then the system folders, then PATH. From python.exe
+# the MIKE Zero bin\x64 folder must be on PATH.
+lib = ctypes.CDLL("MShe_wq.dll", winmode=0)
 
-LeID =  50 # Copy from WQ MOpenMI.f90, keep up to date!
+LeID     =  50 # Copy from WQ MOpenMI.f90, keep up to date!
+LeDesBig = 250 # Copy from WQ MOpenMI.f90, keep up to date!
 
 #---------------------------------------------------
 
@@ -92,8 +89,9 @@ def get_input_exchange_item(item):
   i = ctypes.c_int(item + 1)
   buf1 = ctypes.create_string_buffer(LeID)
   buf2 = ctypes.create_string_buffer(LeID)
-  buf3 = ctypes.create_string_buffer(LeID)
+  buf3 = ctypes.create_string_buffer(LeDesBig)
   l = ctypes.c_size_t(LeID)
+  l_des = ctypes.c_size_t(LeDesBig)
   eum_type   = ctypes.c_int(0)
   eum_unit   = ctypes.c_int(0)
   hidden     = ctypes.c_int(0)
@@ -102,7 +100,7 @@ def get_input_exchange_item(item):
     ctypes.byref(i),
     buf1, buf2, buf3,
     ctypes.byref(eum_type), ctypes.byref(eum_unit), ctypes.byref(hidden), ctypes.byref(needed_wm),
-    l, l, l
+    l, l, l_des
     )
   if res == 0:
     raise Exception("Error getting input exchange item from MIKE-She WQ")
@@ -139,22 +137,23 @@ def get_output_exchange_item(item):
   i = ctypes.c_int(item + 1)
   buf1 = ctypes.create_string_buffer(LeID)
   buf2 = ctypes.create_string_buffer(LeID)
-  buf3 = ctypes.create_string_buffer(LeID)
+  buf3 = ctypes.create_string_buffer(LeDesBig)
   l = ctypes.c_size_t(LeID)
+  l_des = ctypes.c_size_t(LeDesBig)
   eum_type   = ctypes.c_int(0)
   eum_unit   = ctypes.c_int(0)
-  needed_wm  = ctypes.c_int(0)
+  hidden     = ctypes.c_int(0)
   res = lib.MSHEWQ_GETOUTPUTEXCHANGEITEM(
     ctypes.byref(i),
     buf1, buf2, buf3,
-    ctypes.byref(eum_type), ctypes.byref(eum_unit), ctypes.byref(needed_wm),
-    l, l, l
+    ctypes.byref(eum_type), ctypes.byref(eum_unit), ctypes.byref(hidden),
+    l, l, l_des
     )
   if res == 0:
     raise Exception("Error getting output exchange item from MIKE-She WQ")
   return (
     buf1.value.decode().rstrip(), buf2.value.decode().rstrip(), buf3.value.decode(),
-    eum_type.value, eum_unit.value, needed_wm.value != 0
+    eum_type.value, eum_unit.value, hidden.value != 0
   )
 
 #---------------------------------------------------

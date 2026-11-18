@@ -1,8 +1,8 @@
-# Engine interfaces: water movement and water quality from a Python plugin
+# Engine interfaces: the C interfaces of water movement and water quality from Python
 
 `MShePy` gives convenient Python access to the water movement (WM) simulation, but not to water quality (WQ).
-Both engines also have C interfaces. The two modules in this folder wrap them with `ctypes`, so that a MIKE SHE
-Python plugin can read and write WQ data, and WM data in the same way:
+Both engines also have C interfaces. The two modules in this folder wrap them with `ctypes`, so that Python
+can read and write WQ data, and WM data in the same way:
 
 | Module | Engine library | Main functions |
 |---|---|---|
@@ -13,10 +13,14 @@ Access through these wrappers is less convenient than through `MShePy`: items ar
 ID and element set (for example `BaseGrid`, `SZ3DGrid`, `WMUZ2DGrid`, `WMUZ3DGrid`), and values come as flat arrays
 in the engine's (Fortran) order. Use `MShePy` for water movement wherever it offers what you need.
 
+Built on the wrappers: [WmWqCoupling](WmWqCoupling/README.md) runs a WQ simulation from a WM plugin and
+exchanges values between the two engines.
+
 ## Requirements
 
-- The modules load the engine libraries from the folder of the running executable, so they only work inside a
-  simulation, i.e. imported by a plugin that MIKE SHE runs. They do not work from `python.exe`.
+- The modules load `MShe_wq.dll` and `MShe_wm.dll` by name through the normal library search. Inside a
+  simulation, i.e. imported by a plugin that MIKE SHE runs, the libraries are found in the engine's own folder.
+  From `python.exe` the `bin\x64` folder of the MIKE Zero installation must be on `PATH`.
 - The engine libraries must be from the same MIKE SHE release as the setup.
 
 ## Use
