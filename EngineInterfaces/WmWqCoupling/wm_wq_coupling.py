@@ -1,30 +1,46 @@
 """MIKE-SHE plugin to enable WM-WQ coupling.
+
+This module was developed for a specific setup, not as a general WM-WQ coupling that works out of
+the box. It is intended as a starting point for developing other model specific couplings. DHI does
+not support it, takes no responsibility for a coupling built from it or for the engines processing
+it correctly in such a configuration. The documentation of how to create a setup may be incomplete
+and may not name all requirements. The module and the engines may not guard against invalid use.
+
+The original model included MIKE ECO Lab. The transfers inside WQ (transfer_wq2wq: the sum of a species
+over the UZ layers into an "s_<name>" species, the root depth taken from the second WQ-to-WM transfer, the
+copy-down of the top layer) are the conventions of that setup.
+
 Usage:
-  - Set any extra transfer items that are required for your model
-  - change LOG_LEVEL below if desired (0 for no logging, 3 for max)
-  - attach this plugin to a MIKE-SHE model.
+  - Set the transfer items that are required for your model (see README.md)
+  - change LOG_LEVEL if desired (0 for no logging, 4 for max)
+  - attach a plugin that re-exports the hooks of this module to a MIKE-SHE model.
 Transfer wm->wq:
   - Find a WM result item that is available as output via the python api
   - Create a WQ species with a telling name
-  - Add data to extra_items list in the code below
+  - Add a Transfer to transfers_wm2wq
   - ElementSets: Either equal or WM "BaseGrid" to WQ "WMUZ3DGrid"
+Transfer wq->wm:
+  - Add a Transfer to transfers_wq2wm: the source is a WQ item on "WMUZ3DGrid" (its top layer is used),
+    the target the MIKE SHE data type number of a WM item on "BaseGrid"
+Transfer wq->wq (transfer_wq2wq, once per WQ time step):
+  - needs the root depth as second entry of transfers_wq2wm (target_item = 11)
+  - a species "s_<name>" receives the sum of the species "<name>" over the UZ layers
+  - the species in copydown_names get their top layer value copied to all layers below
 """
 
 import sys
 import os
 
-# make sure the wm- and wq- python wrappers can be found, assuming they are in the same directory
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# the wm- and wq- python wrappers: next to this file (copied into a setup) or in the parent folder (repository layout)
+this_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(this_dir, ".."))
+sys.path.insert(0, this_dir)
 import wq_wrapper as wq
 import wm_wrapper as wm
 import numpy as np
+import MShePy as ms
 
-if "d.exe" in sys.executable:
-  import MShePyd as ms
-else:
-  import MShePy as ms
-
-LOG_LEVEL = 2 # 1-3 currently used
+LOG_LEVEL = 2 # 1-4 currently used
 items_needed = []
 sim_start = None
 total_h_wq = 0
@@ -78,6 +94,7 @@ def transfer_wm2wq():
   """Transfer values:
   - WM values that are needed for WQ to run (flows etc.)
   - ExtraItems that are needed for a specific setup"""
+  global ok
   ok = False
   # wm-wq-coupling items, can be transferred verbatim
   for item, el_set in items_needed:
@@ -108,6 +125,7 @@ def transfer_wm2wq():
 def transfer_wq2wm():
   """Transfer values:
   - WQ to WM feedback values"""
+  global ok
   ok = False
   # LAI: transfer from "fixed" in WQ to LAI in WM and take care of the different element set
   #      (nUz does _not_ include boundary cells, nRef does!)
@@ -119,7 +137,7 @@ def transfer_wq2wm():
     n = 0
     shp = wm_values.shape()
 
-    # transfer values from ecolab to WM, skip boundary cells as they are not included in UZ WQ cells
+    # transfer values from MIKE ECO Lab to WM, skip boundary cells as they are not included in UZ WQ cells
     for ix in range(shp[0]):
       for iy in range(shp[1]):
         if ms.wm.gridIsInternal(ix, iy):
@@ -144,6 +162,12 @@ def uz_values_available(t_start: float, item: str) -> bool:
 def transfer_wq2wq():
   """Transfer values:
   - WQ to WQ (aggregation)"""
+
+  # The aggregation works on the root depth and assumes it is the 2nd item in the list.
+  if len(transfers_wq2wm) < 2:
+    return
+  if transfers_wq2wm[1].target_item != 11: # 11 is the mshe new data type of root depth
+    raise Exception("The WQ-to-WQ transfer needs the root depth as second entry of transfers_wq2wm (target_item = 11)")
 
   tr = transfers_wq2wm[1] # RD
   tStart, _, rd_3d = wq.get_values(tr.source_item, tr.source_elem)
@@ -196,7 +220,6 @@ def transfer_wq2wq():
     # get values as numpy array
     _, _, wq_values = wq.get_values(transfer.source_item, transfer.source_elem)
     log(3, wq_values, '\r\n\r\n')
-    value_sum = wq_values
     wq_values[:] = [sum(col) for col in zip(*wq_values)]
     log(3, wq_values, '\r\n\r\n')
     wq.set_values(transfer.target_item, transfer.target_elem, wq_values)
@@ -220,7 +243,7 @@ def transfer_wq2wq():
 
 def postEnterSimulator():
   """After having intialized mshe-WM: Initialize WQ model and WM-WQ coupling"""
-  global items_needed, sim_start, ok, nuz3, lluz, ol_drain, z_top_uz, z_bot_uz
+  global items_needed, sim_start, ok, nuz3, lluz, z_top_uz, z_bot_uz
   ok = False
   # breakpoint()
   she_path = ms.wm.getSheFilePath()
@@ -234,9 +257,6 @@ def postEnterSimulator():
   n_items = wq.get_input_exchange_item_count()
   item_names_nos = set()
   item_names_s = set()
-
-  ol_drain = ms.dataset(ms.paramTypes.OLDR_IN_FLX)
-  ol_drain.unit("mm/day")
 
   log(2, "")
   log(2, "Identify items for exchange (plugin)...")

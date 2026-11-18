@@ -1,14 +1,10 @@
 import ctypes
 import numpy as np
-import os
-import sys
 
-# assume we are running mshe_watermovement(d).exe. If we are running from python.exe we are screwed!
-exe_dir = os.path.dirname(sys.executable)
-if "d.exe" in sys.executable:
-  lib = ctypes.CDLL(os.path.join(exe_dir, "MShe_wmd.dll"), winmode=0)
-else:
-  lib = ctypes.CDLL(os.path.join(exe_dir, "MShe_wm.dll"), winmode=0)
+# winmode=0: the classic LoadLibrary search, i.e. the folder of the running executable first (inside a MIKE SHE
+# engine process the library is already loaded from there), then the system folders, then PATH. From python.exe
+# the MIKE Zero bin\x64 folder must be on PATH.
+lib = ctypes.CDLL("MShe_wm.dll", winmode=0)
 
 
 #---------------------------------------------------
