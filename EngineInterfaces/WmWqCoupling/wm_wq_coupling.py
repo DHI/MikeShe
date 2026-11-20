@@ -131,7 +131,7 @@ def transfer_wq2wm():
   #      (nUz does _not_ include boundary cells, nRef does!)
   for tr in transfers_wq2wm:
     tStart, tEnd, wq_values = wq.get_values(tr.source_item, tr.source_elem)
-    if not uz_values_available(tStart, tr.source_item):
+    if not uz_values_available(tEnd, tr.source_item):
       return
     _, _, wm_values = ms.wm.getValues(tr.target_item)
     n = 0
@@ -148,12 +148,13 @@ def transfer_wq2wm():
   ok = True
 
 
-def uz_values_available(t_start: float, item: str) -> bool:
+def uz_values_available(t_end: float, item: str) -> bool:
   """WQ fills UZ items (fixed and concentration, element set WMUZ3DGrid) only after a WQ time step
   that included a UZ transport step. After an OL-only step (OL AD time step shorter than the UZ AD
-  time step) get_values returns zeros and t_start = -1; those zeros must not be processed or written
-  back, they would overwrite the UZ state."""
-  if t_start >= 0:
+  time step) get_values returns zeros and an end time of -1.
+  The start time does not tell, it is always -1 for instantaneous values. The end time is 0 for the
+  initial values and the UZ time after a UZ step."""
+  if t_end >= 0:
     return True
   log(3, f"No UZ step in the last WQ step, '{item}' not available - skipping UZ transfers")
   return False
@@ -170,8 +171,8 @@ def transfer_wq2wq():
     raise Exception("The WQ-to-WQ transfer needs the root depth as second entry of transfers_wq2wm (target_item = 11)")
 
   tr = transfers_wq2wm[1] # RD
-  tStart, _, rd_3d = wq.get_values(tr.source_item, tr.source_elem)
-  if not uz_values_available(tStart, tr.source_item):
+  _, tEnd, rd_3d = wq.get_values(tr.source_item, tr.source_elem)
+  if not uz_values_available(tEnd, tr.source_item):
     return
   rd_2d = rd_3d[-1, :]  # only calculated in top layer (?), makes no sense to have different values over depth, copy down not done yet
 
